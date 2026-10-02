@@ -109,6 +109,10 @@ func (s State) Empty() bool {
 	return s.Goal == "" && len(s.Clarified) == 0 && len(s.Constraints) == 0 && len(s.Terms) == 0 && len(s.Open) == 0
 }
 
+// IsZero — для json omitzero: состояние, которое ни разу не менялось, в
+// файл диалога не пишется (файлы без задачи остаются побайтно прежними).
+func (s State) IsZero() bool { return s.Empty() && s.Version == 0 }
+
 // Clone — глубокая копия (ветвление, снимок до хода): правка в одной ветке
 // не должна доходить до другой через общий массив среза.
 func (s State) Clone() State {

@@ -28,6 +28,7 @@ import (
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/facts"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/features"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/llm"
+	"github.com/AlexS8332/AnimalGuide_Task25/internal/task"
 )
 
 // Статусы хода.
@@ -156,6 +157,13 @@ type Branch struct {
 	Turns    []Turn        `json:"turns"`
 	// Facts — карточка фактов ветки: при ветвлении копируется снимком точки.
 	Facts facts.State `json:"facts"`
+	// Task — память задачи ветки (v25): цель, уточнения, ограничения,
+	// термины, открытое. Как Facts — своя у каждой ветки, при ветвлении
+	// копируется снимком точки. omitzero, а не omitempty: у структуры
+	// omitempty не срабатывает, а файл диалога без задачи не должен
+	// меняться — новое поле без смены schema (ФТ-49…53), старые файлы
+	// читаются как есть, пустая задача в файл не пишется.
+	Task task.State `json:"task,omitzero"`
 }
 
 // Checkpoint — точка сохранения: место в ветке, от которого можно
@@ -170,6 +178,9 @@ type Checkpoint struct {
 	After   string      `json:"after,omitempty"`
 	Created time.Time   `json:"created"`
 	Facts   facts.State `json:"facts"`
+	// Task — снимок памяти задачи в точке (v25): ветка от точки начинается
+	// с той целью и теми договорённостями, что были в ней.
+	Task task.State `json:"task,omitzero"`
 }
 
 // Conversation — диалог целиком.
@@ -338,6 +349,31 @@ func (c *Conversation) Facts() facts.State {
 	return facts.State{}
 }
 
+// Task — память задачи текущей ветки.
+func (c *Conversation) Task() task.State {
+	if b := c.Current(); b != nil {
+		return b.Task
+	}
+	return task.State{}
+}
+
+// SetTask записывает память задачи ветки. Снимок старше записанного
+// (Version меньше) не принимается: ход, начатый до ручной правки на панели,
+// не должен её затереть — та же арифметика, что у карточки фактов в Append.
+// Возвращает, записано ли.
+func (c *Conversation) SetTask(branchID string, s task.State) (bool, error) {
+	b := c.Find(branchID)
+	if b == nil {
+		return false, fmt.Errorf("%w: %s", ErrNoBranch, branchID)
+	}
+	if s.Version < b.Task.Version {
+		return false, nil
+	}
+	b.Task = s.Clone()
+	c.Updated = time.Now()
+	return true, nil
+}
+
 // Deltas — правки карточек пути ветки, с ходом у каждой.
 func (c *Conversation) Deltas(branch string) []card.Delta {
 	var out []card.Delta
@@ -397,7 +433,7 @@ func (c *Conversation) Mark(branchID, name string) (Checkpoint, error) {
 		after = turns[len(turns)-1].ID
 	}
 	cp := Checkpoint{ID: NewID(), Name: name, Branch: b.ID, At: len(c.Path(branchID)), Turn: len(turns),
-		After: after, Created: time.Now(), Facts: b.Facts.Clone()}
+		After: after, Created: time.Now(), Facts: b.Facts.Clone(), Task: b.Task.Clone()}
 	c.Checkpoints = append(c.Checkpoints, cp)
 	c.Updated = time.Now()
 	return cp, nil
@@ -428,7 +464,7 @@ func (c *Conversation) Fork(checkpointID, name string) (*Branch, error) {
 		name = fmt.Sprintf("ветка %d", len(c.Branches)+1)
 	}
 	b := &Branch{ID: NewID(), Name: name, Parent: cp.Branch, ForkAt: cp.At, ForkTurn: cp.Turn, Created: time.Now(),
-		Messages: []llm.Message{}, Turns: []Turn{}, Facts: cp.Facts.Clone()}
+		Messages: []llm.Message{}, Turns: []Turn{}, Facts: cp.Facts.Clone(), Task: cp.Task.Clone()}
 	c.Branches = append(c.Branches, b)
 	c.Updated = time.Now()
 	return b, nil
@@ -492,10 +528,15 @@ func (c *Conversation) Clone() *Conversation {
 			cb.Turns[j] = t
 		}
 		cb.Facts = b.Facts.Clone()
+		cb.Task = b.Task.Clone()
 		out.Branches[i] = &cb
 	}
 	out.Checkpoints = make([]Checkpoint, len(c.Checkpoints))
 	copy(out.Checkpoints, c.Checkpoints)
+	for i := range out.Checkpoints {
+		out.Checkpoints[i].Facts = c.Checkpoints[i].Facts.Clone()
+		out.Checkpoints[i].Task = c.Checkpoints[i].Task.Clone()
+	}
 	return &out
 }
 
