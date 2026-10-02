@@ -167,14 +167,25 @@ func (h *Hook) Before(ctx context.Context, t *runs.Turn) error {
 		obs, rule = &issued{}, citeLeadRule
 	}
 	via, detail := "", ""
-	var history []string
 	if piped {
 		cfg.Index = index
-		history = humanTurns(t)
-		t.Request.Tools = append(t.Request.Tools, pipelineTool(h.pipeline(), cfg, history, k, obs))
+		base := retrieve.Query{Context: humanTurns(t)}
+		// Память задачи (v25, механизм task): термины и цель ветки — в
+		// переписывание запроса. Задача хода уже с правкой извлекателя
+		// (persona идёт раньше rag): «барс = ирбис», сказанное в этой же
+		// реплике, работает в этом же поиске. Выключен механизм — поиск
+		// прежний.
+		if t.Features.On(features.Task) {
+			base.Terms, base.Goal = t.Task.Terms, t.Task.Goal
+		}
+		t.Request.Tools = append(t.Request.Tools, pipelineTool(h.pipeline(), cfg, base, k, obs))
 		via = "; " + strings.Join(names, ", ")
 		detail = "\nВторой этап поиска (" + strings.Join(names, ", ") + "): " + cfg.Describe() +
 			". Переписанный запрос идёт только в поиск, ведущий видит исходную реплику; в ответе kb_search — переписанный запрос и сколько фрагментов отсёк фильтр."
+		if cfg.Rewrite == retrieve.RewriteCode && (len(base.Terms) > 0 || base.Goal != "") {
+			detail += fmt.Sprintf("\nПамять задачи в переписывании: терминов %d, цель «%s» — вид из неё получит вопрос-продолжение, если вида нет в реплике и прошлых репликах.",
+				len(base.Terms), base.Goal)
+		}
 	} else {
 		t.Request.Tools = append(t.Request.Tools, searchTool(h.Searcher, index, k, obs))
 	}
