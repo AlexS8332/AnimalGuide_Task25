@@ -3,9 +3,9 @@
   "slug": "animal-guide-rag-chat",
   "title": "AnimalGuide: мини-чат с RAG, источниками и памятью задачи (DeepSeek, Go + браузер)",
   "stack": "go",
-  "status": "planned",
+  "status": "done",
   "created": "2026-10-02",
-  "updated": "2026-10-02",
+  "updated": "2026-10-03",
   "repo": "",
   "env": [
     "DEEPSEEK_API_KEY"
