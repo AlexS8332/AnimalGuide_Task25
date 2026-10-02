@@ -24,14 +24,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/facts"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/llm"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/memory"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/profile"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/task"
+	"github.com/AlexS8332/AnimalGuide_Task25/internal/words"
 )
 
 // recentMessages — сколько последних сообщений показать вместе с репликой:
@@ -161,8 +165,14 @@ func (e Extractor) Run(ctx context.Context, in Input) (Update, error) {
 
 // apply раскладывает ответ по адресатам по правилам приложения.
 func (u *Update) apply(in Input, r Reply) {
+	// Задача — первой: принятые ограничения разговора решают, какие правки
+	// профиля на самом деле правила этого разговора (conversationOnly).
+	if in.Targets.Task {
+		u.TaskChanges = u.Task.Apply(r.Task, in.User, in.Turn)
+	}
 	if in.Targets.Profile {
-		u.ProfileChanges = profile.Apply(&u.Profile, r.Profile, in.User, in.Turn)
+		patch, dropped := conversationOnly(r.Profile, u.TaskChanges, in.User)
+		u.ProfileChanges = append(dropped, profile.Apply(&u.Profile, patch, in.User, in.Turn)...)
 	}
 	if in.Targets.Long || in.Targets.Work {
 		var long, work *memory.Card
@@ -210,11 +220,93 @@ func (u *Update) apply(in Input, r Reply) {
 			}
 		}
 	}
-	// Задача — только словами человека: цитата каждой правки сверяется с
-	// репликой этого хода (task.Apply), ответ справочника её не меняет.
-	if in.Targets.Task {
-		u.TaskChanges = u.Task.Apply(r.Task, in.User, in.Turn)
+}
+
+// alwaysRe — слова, которыми человек переносит правило за пределы этого
+// разговора: «всегда», «впредь», «во всех ответах», «в любом разговоре».
+var alwaysRe = regexp.MustCompile(`(?i)всегда|впредь|во всех|в любом разговоре`)
+
+// conversationOnly — правки профиля, которые на самом деле ограничения
+// этого разговора. Живой прогон: «без латыни» и «не больше пяти
+// предложений» сценария A легли и в задачу, и в профиль, и профиль унёс их
+// в сценарий B, где человек просил другого. Правило: правка профиля, чья
+// цитата совпадает с цитатой принятого ограничения задачи (одна в другой
+// или одни и те же значимые слова), отбрасывается, если в реплике нет
+// «всегда», «впредь», «во всех», «в любом разговоре». Разовые правки
+// (scope once) не трогаем — они профиль и не меняют, а форму этого ответа
+// задают. Снятие ограничения профиля тоже не трогаем: оно возвращает
+// профиль к человеку, а не к разговору. Возвращает патч без отброшенных и
+// отказы с причиной — чипами под ответом, как любой отказ профиля.
+func conversationOnly(p profile.Patch, tc []task.Change, user string) (profile.Patch, profile.Changes) {
+	var quotes []string
+	for _, c := range task.Applied(tc) {
+		if c.Op == task.OpAdd && c.List == task.ListConstraints && strings.TrimSpace(c.Quote) != "" {
+			quotes = append(quotes, c.Quote)
+		}
 	}
+	if len(quotes) == 0 || alwaysRe.MatchString(user) {
+		return p, nil
+	}
+	const reason = "ограничение этого разговора — в задаче, а не в профиле (в реплике нет «всегда», «впредь»)"
+	match := func(q string) bool {
+		for _, tq := range quotes {
+			if sameQuote(q, tq) {
+				return true
+			}
+		}
+		return false
+	}
+	var out profile.Patch
+	var dropped profile.Changes
+	for _, op := range p.Set {
+		if !strings.EqualFold(strings.TrimSpace(op.Scope), profile.ScopeOnce) && match(op.Quote) {
+			title := op.Field
+			if f, ok := profile.FieldOf(op.Field); ok {
+				title = f.Title
+			}
+			dropped = append(dropped, profile.Change{Op: profile.OpReject, Field: op.Field, Title: title, Value: op.Value,
+				Source: profile.SourceRule, Reason: reason, Quote: op.Quote})
+			continue
+		}
+		out.Set = append(out.Set, op)
+	}
+	for _, op := range p.Limits {
+		if !op.Drop && match(op.Quote) {
+			dropped = append(dropped, profile.Change{Op: profile.OpReject, Value: op.Text, Source: profile.SourceRule, Reason: reason, Quote: op.Quote})
+			continue
+		}
+		out.Limits = append(out.Limits, op)
+	}
+	return out, dropped
+}
+
+// sameQuote — две цитаты об одном куске реплики: одна содержит другую (без
+// регистра, ё и знаков) или значимые слова одной все есть в другой.
+func sameQuote(a, b string) bool {
+	na, nb := normWords(a), normWords(b)
+	if na == "" || nb == "" {
+		return false
+	}
+	if strings.Contains(" "+na+" ", " "+nb+" ") || strings.Contains(" "+nb+" ", " "+na+" ") {
+		return true
+	}
+	return covers(a, b) || covers(b, a)
+}
+
+// covers — значимые слова a есть, и все они есть в b.
+func covers(a, b string) bool {
+	want, have := words.Significant(a), words.Significant(b)
+	for _, w := range want {
+		if !slices.Contains(have, w) {
+			return false
+		}
+	}
+	return len(want) > 0
+}
+
+func normWords(s string) string {
+	s = strings.ReplaceAll(strings.ToLower(s), "ё", "е")
+	return strings.Join(strings.FieldsFunc(s, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }), " ")
 }
 
 // Changed — изменилось ли хоть что-нибудь.
