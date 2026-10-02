@@ -77,7 +77,7 @@
 
     await check('пульт: список диалогов и выбранный', () => {
       const opts = qa('#dialog-select option');
-      assert(opts.length === 4, 'диалогов в списке ' + opts.length);
+      assert(opts.length === 5, 'диалогов в списке ' + opts.length);
       assert($('dialog-select').value === app.conv.id, 'выбран не текущий диалог');
     });
 
@@ -2247,6 +2247,170 @@
     const top = q('#feed .turn').getBoundingClientRect().top + document.body.scrollTop;
     document.body.scrollTop = top - $('pult').getBoundingClientRect().height - 8;
     await sleep(200);
+  };
+
+  /* Память задачи (v25): подставной REST за /api/conversations/{id}/task
+     (edgeTask в edge_task_test.go) хранит состояние в памяти; ход диалога
+     несёт изменения задачи в extras.task (edgeTaskHook). */
+  const taskList = key => q(`#panel-task .task-list[data-list="${key}"]`);
+  const taskItems = key => [...(taskList(key) ? taskList(key).querySelectorAll('li .task-text') : [])].map(x => x.textContent);
+  const taskPuts = () => factsCalls.filter(x => x.method === 'PUT' && /\/api\/conversations\/[0-9a-f]+\/task$/.test(x.url));
+  const taskReady = () => until('панель задачи', () => q('#panel-task .task-goal') && !q('#task-form'), 8000);
+  function taskForm(values) {
+    const f = $('task-form');
+    for (const [k, v] of Object.entries(values)) f.elements[k].value = v;
+  }
+
+  scenarios.task = async () => {
+    spyFetch();
+    await booted();
+    window.__xss = undefined;
+    await taskReady();
+
+    await check('задача: панель на пульте — цель, списки, версия', () => {
+      assert(text('#panel-task .task-goal .task-text') === 'доклад для школьников о кошках Азии', 'цель: ' + text('#panel-task .task-goal'));
+      assert(text('#panel-task .task-goal .task-turn') === 'ход 1', 'ход цели: ' + text('#panel-task .task-goal'));
+      assert(q('#panel-task .task-goal').title.includes('«Готовлю доклад для школьников о кошках Азии»'), 'подсказка цели: ' + q('#panel-task .task-goal').title);
+      assert(taskItems('constraints').join('|') === 'без латыни|не больше пяти предложений', 'ограничения: ' + taskItems('constraints'));
+      assert(taskItems('terms').join('|') === 'барс → ирбис', 'термины: ' + taskItems('terms'));
+      assert(taskItems('open').length === 1, 'открыто: ' + taskItems('open'));
+      assert(taskItems('clarified').length === 0 && text('#panel-task .task-list[data-list="clarified"] .hint') === '—', 'уточнено не пусто');
+      assert(qa('#panel-task .task-list h3').map(h => h.textContent).join(',') === 'Уточнено,Ограничения,Термины,Открыто', 'заголовки списков');
+      assert(text('#panel-task .task-version') === 'v4', 'версия: ' + text('#panel-task .task-version'));
+      assert(factsCalls.some(x => x.method === 'GET' && x.url === `/api/conversations/${app.conv.id}/task`), 'не спросили taskAPI');
+    });
+
+    await check('задача: у пункта — номер хода и цитата в подсказке', () => {
+      const li = taskList('constraints').querySelector('li');
+      assert(li.querySelector('.task-turn').textContent === 'ход 1', 'номер хода: ' + li.textContent);
+      assert(li.title === 'ход 1 · «Без латыни»', 'подсказка: ' + li.title);
+      assert(taskList('terms').querySelector('li').title.includes('«Барс — это ирбис»'), 'подсказка термина');
+    });
+
+    await check('задача: чипы правок под ответом', () => {
+      const chips = qa('#feed .chip.task-chip');
+      assert(chips.length === 6, 'чипов ' + chips.length + ': ' + chips.map(c => c.textContent).join(' | '));
+      const by = (op, list) => chips.find(c => c.dataset.op === op && c.dataset.list === list);
+      assert(by('set_goal', 'goal') && by('set_goal', 'goal').textContent.includes('цель: доклад для школьников о кошках Азии'), 'нет чипа цели');
+      const add = chips.filter(c => c.dataset.op === 'add' && c.dataset.list === 'constraints').map(c => c.textContent);
+      assert(add.some(t => t.includes('+ ограничение: без латыни')) && add.length === 2, 'ограничения: ' + add);
+      assert(by('add', 'terms').textContent.includes('+ термин: барс = ирбис'), 'термин: ' + by('add', 'terms').textContent);
+      assert(by('remove', 'open').textContent.includes('− открыто: для какого класса'), 'снятый вопрос: ' + by('remove', 'open').textContent);
+      const rej = by('reject', 'clarified');
+      assert(rej && rej.classList.contains('rejected') && !rej.classList.contains('ok'), 'отклонённый не приглушён');
+      assert(rej.textContent.includes('нет цитаты в реплике человека') && rej.title.includes('нет цитаты'), 'нет причины: ' + rej.textContent);
+      assert(getComputedStyle(rej).borderStyle === 'dashed', 'отклонённый выглядит как принятый');
+    });
+
+    await check('задача: разметка из данных — буквами', async () => {
+      assert(taskItems('open')[0] === '<b>какие</b> виды взять', 'открытый вопрос: ' + taskItems('open'));
+      assert(!taskList('open').querySelector('b'), 'разметка стала элементом на панели');
+      const rej = qa('#feed .chip.task-chip').find(c => c.dataset.op === 'reject');
+      assert(rej.textContent.includes('<img src=x onerror="window.__xss=25">'), 'чип: ' + rej.textContent);
+      assert(!q('#feed img') && !q('#panel-task img'), 'элемент из данных');
+      await sleep(100);
+      assert(window.__xss === undefined, 'исполнился код: __xss=' + window.__xss);
+    });
+
+    await check('задача: правка формой → PUT → панель обновилась', async () => {
+      click('#task-edit');
+      await until('форма', () => q('#task-form'));
+      const f = $('task-form');
+      assert(f.elements.goal.value === 'доклад для школьников о кошках Азии', 'цель в форме: ' + f.elements.goal.value);
+      assert(f.elements.constraints.value === 'без латыни\nне больше пяти предложений', 'ограничения в форме: ' + f.elements.constraints.value);
+      assert(f.elements.terms.value === 'барс = ирбис', 'термины в форме: ' + f.elements.terms.value);
+      assert(!q('#task-edit') && q('#task-save') && q('#task-cancel'), 'кнопки формы');
+      taskForm({ goal: 'доклад для 5 класса о кошках Азии', constraints: f.elements.constraints.value + '\nтолько краснокнижные\n\n',
+        terms: 'барс = ирбис\nманул = палласов кот', open: '', clarified: 'уровень: 5 класс' });
+      const before = taskPuts().length;
+      click('#task-save');
+      await until('PUT', () => taskPuts().length === before + 1);
+      await taskReady();
+      const body = JSON.parse(taskPuts()[before].body);
+      assert(body.goal === 'доклад для 5 класса о кошках Азии' && !body.goal_quote && !body.goal_turn, 'цель в PUT: ' + JSON.stringify(body));
+      assert(body.constraints.length === 3 && body.constraints[0].quote === 'Без латыни' && body.constraints[0].turn === 1, 'старый пункт потерял цитату: ' + JSON.stringify(body.constraints));
+      assert(body.constraints[2].text === 'только краснокнижные' && body.constraints[2].turn === 0 && !body.constraints[2].quote, 'новый пункт: ' + JSON.stringify(body.constraints[2]));
+      assert(body.terms.length === 2 && body.terms[1].term === 'манул' && body.terms[1].meaning === 'палласов кот' && body.terms[0].quote === 'Барс — это ирбис', 'термины в PUT: ' + JSON.stringify(body.terms));
+      assert(Array.isArray(body.open) && body.open.length === 0 && body.clarified.length === 1 && body.version === 4, 'open/clarified/version: ' + JSON.stringify(body));
+      assert(text('#panel-task .task-goal .task-text') === 'доклад для 5 класса о кошках Азии', 'цель на панели: ' + text('#panel-task .task-goal'));
+      assert(taskItems('constraints').length === 3 && taskItems('terms').join('|') === 'барс → ирбис|манул → палласов кот', 'списки: ' + taskItems('terms'));
+      assert(taskItems('open').length === 0 && taskItems('clarified').join() === 'уровень: 5 класс', 'открыто/уточнено');
+      assert(taskList('constraints').querySelectorAll('li')[2].title === 'внесено руками', 'подсказка нового пункта: ' + taskList('constraints').querySelectorAll('li')[2].title);
+      assert(text('#panel-task .task-version') === 'v5', 'версия: ' + text('#panel-task .task-version'));
+    });
+
+    await check('задача: «отмена» — без PUT, панель прежняя', async () => {
+      const before = taskPuts().length;
+      click('#task-edit');
+      await until('форма', () => q('#task-form'));
+      taskForm({ goal: 'другое' });
+      click('#task-cancel');
+      await taskReady();
+      assert(taskPuts().length === before, 'ушёл PUT');
+      assert(text('#panel-task .task-goal .task-text') === 'доклад для 5 класса о кошках Азии', 'цель: ' + text('#panel-task .task-goal'));
+    });
+
+    await check('задача: термин без «=» не уходит на сервер', async () => {
+      const before = taskPuts().length;
+      click('#task-edit');
+      await until('форма', () => q('#task-form'));
+      taskForm({ terms: 'просто строка' });
+      click('#task-save');
+      await sleep(300);
+      assert(taskPuts().length === before, 'ушёл PUT');
+      assert(q('#task-form') && $('task-form').elements.terms.value === 'просто строка', 'форма закрылась или потеряла ввод');
+      assert(!$('toast').hidden && $('toast').classList.contains('bad') && $('toast').textContent.includes('термин = значение'), 'нет ошибки: ' + $('toast').textContent);
+      render(); // перерисовка пульта не теряет недописанное
+      assert($('task-form').elements.terms.value === 'просто строка', 'ввод потерян при перерисовке');
+      click('#task-cancel');
+      await taskReady();
+    });
+
+    await check('задача: механизм выключен — свёрнутая подсказка', async () => {
+      click('#mechanisms .mech[data-arg="task"]');
+      await until('свёрнута', () => q('#panel-task.task-off'));
+      assert(text('#panel-task').includes('включите «Память задачи»'), 'подсказка: ' + text('#panel-task'));
+      assert(!q('#panel-task .task-goal') && !q('#task-edit'), 'панель не свёрнута');
+      click('#panel-task [data-action="toggleMechanism"]');
+      await taskReady();
+      assert(q('#mechanisms .mech[data-arg="task"]').classList.contains('on'), 'механизм не включился');
+    });
+
+    await check('пресет «Справочная (RAG)»: диалог с пятью механизмами', async () => {
+      const before = app.convs.length, old = app.conv.id;
+      click('#new-rag-dialog');
+      await until('новый диалог', () => app.conv.id !== old && app.convs.length === before + 1, 8000);
+      const on = name => (app.conv.mechanisms.find(m => m.name === name) || {}).on;
+      for (const n of ['rag', 'rag.filter', 'rag.rewrite', 'rag.cite', 'task']) assert(on(n), 'не включён ' + n);
+      for (const m of app.meta.mechanisms) if (m.on) assert(on(m.name), 'потерян механизм по умолчанию ' + m.name);
+      const post = factsCalls.find(x => x.method === 'POST' && x.url === '/api/conversations' && x.body && x.body.includes('rag.cite'));
+      assert(post && JSON.parse(post.body).features === '+rag,+rag.filter,+rag.rewrite,+rag.cite,+task' && JSON.parse(post.body).empty === true, 'запрос создания: ' + (post && post.body));
+      assert(qa('#dialog-select option').some(o => o.selected && o.textContent.includes('Справочная (RAG)')), 'название не в списке');
+      assert(q('#feed .empty-feed'), 'диалог не пустой');
+    });
+
+    await check('задача: пустое состояние — «цель ещё не названа»', async () => {
+      await taskReady();
+      assert(q('#panel-task .task-goal.empty') && text('#panel-task .task-goal') === 'цель ещё не названа', 'пусто: ' + text('#panel-task .task-goal'));
+      assert(qa('#panel-task .task-list li').length === 0, 'пункты в пустом состоянии');
+      assert(text('#panel-task .task-version') === 'v0', 'версия: ' + text('#panel-task .task-version'));
+    });
+  };
+
+  scenarios['shot-task'] = async () => {
+    await booted();
+    await taskReady();
+    q('#panel-task').scrollIntoView();
+    document.body.scrollTop = 0;
+    await sleep(300);
+  };
+
+  scenarios['shot-task-edit'] = async () => {
+    await booted();
+    await taskReady();
+    click('#task-edit');
+    await until('форма', () => q('#task-form'));
+    await sleep(300);
   };
 
   async function run() {

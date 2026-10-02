@@ -121,6 +121,9 @@ type edgeApp struct {
 	// Диалоги сценария: основной (карточка, ветки, сравнение), подборка,
 	// ответы с источниками (v24) и пустой.
 	main, coll, cite, empty string
+	// taskConv — диалог с памятью задачи (v25); task — её подставной REST.
+	taskConv string
+	task     *edgeTask
 	// facts — подставной демон «Интересных фактов» за /api/facts/.
 	facts *edgeFacts
 	// pipe — подставной REST конвейера за /api/pipeline/.
@@ -166,7 +169,7 @@ func newEdgeApp(t *testing.T) *edgeApp {
 	m := runs.NewManager(runs.Config{
 		Agents: deps, Store: history.NewStore(data), Registry: registry, Defaults: registry.Defaults(),
 		Timeout: time.Minute, Window: history.DefaultWindow, KeepToolRunes: history.DefaultKeepToolRunes,
-		Hooks: []runs.Hook{compile, people},
+		Hooks: []runs.Hook{compile, people, edgeTaskHook{}},
 	})
 	static, err := fs.Sub(webFiles, "web")
 	if err != nil {
@@ -176,7 +179,7 @@ func newEdgeApp(t *testing.T) *edgeApp {
 	for k, v := range persona.Meta() {
 		meta[k] = v
 	}
-	a := &edgeApp{m: m, facts: newEdgeFacts(), pipe: newEdgePipe(), hub: newEdgeHub(), kb: newEdgeKB(t)}
+	a := &edgeApp{m: m, facts: newEdgeFacts(), pipe: newEdgePipe(), hub: newEdgeHub(), kb: newEdgeKB(t), task: newEdgeTask()}
 	leadCite = edgeLeadCite(t, a.kb.rag)
 	a.handler = server.New(m, static, meta, append(people.Extension(), compile.Extension(m)...)...)
 	a.seed(t)
@@ -230,6 +233,9 @@ func (a *edgeApp) seed(t *testing.T) {
 	a.turn(t, a.cite, agents.Request{Text: "Сколько лет живёт манул?"})
 	a.turn(t, a.cite, agents.Request{Text: "Как манул по-латыни?"})
 
+	// v25: диалог с памятью задачи.
+	a.seedTask(t)
+
 	e, err := a.m.Create(runs.StartOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -266,6 +272,9 @@ func (a *edgeApp) page(t *testing.T, shots bool) *httptest.Server {
 	mux.Handle(hubapi.Prefix, a.hub)
 	mux.Handle(kbapi.Prefix, a.kb)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if a.task.serve(w, r) {
+			return
+		}
 		if r.URL.Path == "/" {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Write([]byte(patched))
@@ -323,6 +332,7 @@ func TestEdge(t *testing.T) {
 		{"kb-nofiles", a.main},
 		{"kb-cite", a.main},
 		{"chat-cite", a.cite},
+		{"task", a.taskConv},
 	}
 	total := 0
 	for _, sc := range scenarios {
@@ -361,6 +371,9 @@ func TestEdge(t *testing.T) {
 	}
 
 	if dir := os.Getenv("EDGE_SHOTS"); dir != "" {
+		// Сценарий task правил задачу формой — снимок панели с исходным
+		// состоянием.
+		a.task.set(a.taskConv, edgeTaskState())
 		// Снимки: body прокручивается сам, иначе headless Edge рисует
 		// прокрученную страницу со сдвигом (см. README).
 		shot := a.page(t, true)
@@ -395,6 +408,8 @@ func TestEdge(t *testing.T) {
 			{"kb-ask-modes.png", "shot-kb-ask-modes", a.main},
 			{"kb-cite.png", "shot-kb-cite", a.main},
 			{"chat-cite.png", "shot-chat-cite", a.cite},
+			{"task-panel.png", "shot-task", a.taskConv},
+			{"task-edit.png", "shot-task-edit", a.taskConv},
 		} {
 			edgeRun(t, edge, fmt.Sprintf("%s/?scenario=%s#c=%s", shot.URL, s.scenario, s.conv), "1400,900",
 				"--screenshot="+filepath.Join(abs, s.file))
