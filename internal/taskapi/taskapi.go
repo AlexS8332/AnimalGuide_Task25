@@ -15,11 +15,15 @@
 //	DELETE /api/task/{conv} — очистить
 //
 // Ответ всех четырёх — View. Во время хода правка — 409 (runs.ErrBusy):
-// ход записал бы поверх свой снимок.
+// ход записал бы поверх свой снимок. PUT несёт версию, с которой человек
+// начал правку (task.State.Version из GET); если с тех пор задачу
+// поменял ход или другая вкладка — 409 ErrStale: форма заменила бы
+// состояние целиком и молча стёрла бы чужую правку.
 package taskapi
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -29,6 +33,9 @@ import (
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/server"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/task"
 )
+
+// ErrStale — PUT с версией, которая уже не текущая.
+var ErrStale = errors.New("задача изменилась, обновите")
 
 // Prefix — корень маршрутов.
 const Prefix = "/api/task/"
@@ -88,7 +95,9 @@ func handle(w http.ResponseWriter, r *http.Request, m *runs.Manager) {
 			return
 		}
 		d, err = m.EditTask(id, func(s *task.State) error {
-			body.Version = s.Version
+			if body.Version != s.Version {
+				return fmt.Errorf("%w: у вас версия %d, на сервере %d", ErrStale, body.Version, s.Version)
+			}
 			*s = body
 			return nil
 		})
@@ -123,7 +132,7 @@ func status(err error) int {
 	switch {
 	case errors.Is(err, runs.ErrNotFound):
 		return http.StatusNotFound
-	case errors.Is(err, runs.ErrBusy):
+	case errors.Is(err, runs.ErrBusy), errors.Is(err, ErrStale):
 		return http.StatusConflict
 	}
 	return http.StatusBadRequest

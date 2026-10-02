@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -18,7 +19,7 @@ import (
 
 // edgeTask — подставной REST памяти задачи (v25) по пути адаптера taskAPI
 // в web/app.js: GET /api/task/{id} → State (как internal/taskapi), PUT State →
-// State (версия +1). Хранит в памяти; незнакомый диалог — пустое
+// State (версия +1; версия клиента не текущая — 409). Хранит в памяти; незнакомый диалог — пустое
 // состояние. puts — тела PUT, чтобы сценарий сверил, что ушло на сервер.
 type edgeTask struct {
 	mu     sync.Mutex
@@ -54,6 +55,12 @@ func (e *edgeTask) serve(w http.ResponseWriter, r *http.Request) bool {
 			return true
 		}
 		e.puts = append(e.puts, st)
+		// Как internal/taskapi: версия клиента не текущая — 409.
+		if cur := e.states[m[1]].Version; st.Version != cur {
+			reply(http.StatusConflict, map[string]string{"error": "задача изменилась, обновите: у вас версия " +
+				strconv.Itoa(st.Version) + ", на сервере " + strconv.Itoa(cur)})
+			return true
+		}
 		st.Version = e.states[m[1]].Version + 1
 		e.states[m[1]] = st
 		reply(http.StatusOK, st)
@@ -79,7 +86,7 @@ func (edgeTaskHook) After(_ context.Context, t *runs.Turn) error {
 		return nil
 	}
 	t.Extra(task.BlockName, []task.Change{
-		{Op: "set_goal", List: "goal", Text: "доклад для школьников о кошках Азии"},
+		{Op: "set_goal", List: "goal", Text: "доклад для школьников о кошках Азии", Old: "рассказ о манулах"},
 		{Op: "add", List: "constraints", Text: "без латыни"},
 		{Op: "add", List: "constraints", Text: "не больше пяти предложений"},
 		{Op: "add", List: "terms", Text: "барс = ирбис"},

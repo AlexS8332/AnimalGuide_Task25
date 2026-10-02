@@ -60,7 +60,11 @@ async function api(method, path, body) {
   const text = await res.text();
   let data = {};
   try { data = text ? JSON.parse(text) : {}; } catch (e) { data = { error: text }; }
-  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+  if (!res.ok) {
+    const err = new Error(data.error || ('HTTP ' + res.status));
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
 
@@ -1170,6 +1174,19 @@ Object.assign(actions, {
       task.draft = null;
       toast('Задача сохранена');
     } catch (e) {
+      if (e.status === 409) {
+        // Задачу поменял ход или другая вкладка (или ход ещё идёт): форма
+        // заменила бы состояние целиком — показываем причину и перечитываем.
+        toast('Задача не сохранена: ' + e.message, true);
+        task.editing = false;
+        task.draft = null;
+        task.key = '';
+        task.state = null;
+        task.error = '';
+        taskPaint();
+        taskSync();
+        return;
+      }
       toast('Задача не сохранена: ' + e.message, true);
     }
     taskPaint();
@@ -1177,12 +1194,13 @@ Object.assign(actions, {
 });
 
 // Чипы правок задачи под ответом: extras.task хода — список Change
-// ({op, list, text, reason}); допускается и {changes: [...]}.
+// ({op, list, text, old, reason}); допускается и {changes: [...]}. Замена
+// цели не проходит молча: «цель: X (была: Y)».
 app.chips.task = v => (Array.isArray(v) ? v : (v && v.changes) || []).map(c => {
   const what = taskListOne[c.list] || c.list || '';
   let text, cls = 'ok';
   switch (c.op) {
-    case 'set_goal': text = 'цель: ' + c.text; break;
+    case 'set_goal': text = 'цель: ' + c.text + (c.old ? ` (была: ${c.old})` : ''); break;
     case 'add': text = `+ ${what}: ${c.text}`; break;
     case 'remove': text = `− ${what}: ${c.text}`; cls = ''; break;
     case 'reject': text = `не принято: ${what}: ${c.text}`; cls = 'rejected'; break;
