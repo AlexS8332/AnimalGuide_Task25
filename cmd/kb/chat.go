@@ -256,6 +256,16 @@ func printTurn(w io.Writer, o dialogs.Observed, t *history.Turn) {
 		if v.Check.Unverified {
 			fmt.Fprintln(w, "Проверка кодом: НЕ проверено — "+strings.Join(v.Check.Problems, "; "))
 		}
+		// Принят без опоры (мягкая проверка чисел, вид не из источника):
+		// человек видит, что именно цитатами не подтверждено.
+		if !v.Check.Grounded {
+			if len(v.Check.NumbersMissing) > 0 {
+				fmt.Fprintln(w, "⚠ числа без цитаты: "+strings.Join(v.Check.NumbersMissing, ", "))
+			}
+			if len(v.Check.SpeciesMismatch) > 0 {
+				fmt.Fprintln(w, "⚠ вид не из источника: "+strings.Join(v.Check.SpeciesMismatch, ", "))
+			}
+		}
 	}
 	if t == nil {
 		return
@@ -286,6 +296,9 @@ func printSources(w io.Writer, head string, srcs []rag.CiteViewSrc) {
 				title += " › " + s.Path
 			}
 			title += " (" + s.ChunkID + ")"
+		}
+		if s.Past {
+			title += " — из прошлого хода"
 		}
 		fmt.Fprintf(w, "  [%d] %s\n", s.N, title)
 	}

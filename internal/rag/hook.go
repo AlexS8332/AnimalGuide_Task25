@@ -44,7 +44,11 @@ const leadRule = `База знаний (kb_search) — снимок стате�
 // kb_search и отказом kb_answer, а не правкой системного промпта — иначе
 // ход с «не знаю» обнулял бы кэш префикса окна. Решается оно по всем
 // вызовам kb_search хода (Hook.cite) — отсюда «другой поиск этого хода».
-const citeLeadRule = `База знаний (kb_search) — снимок статей справочника и MDD v2.5. Если сразу после реплики человека стоит выдача kb_search, это вызов кодом до твоего первого шага: опирайся на неё. Если среди твоих инструментов есть kb_answer — ход заканчивай только им, не текстом, и отвечай только по выдаче kb_search этого хода (других источников на этом ходе нет: карточки, Википедию и GBIF не процитировать):
+// Фрагменты, выданные kb_search в прошлых ходах ветки, kb_answer тоже
+// принимает (v25, Hook.past) — с той же дословной сверкой цитат. Фраза о
+// MDD (v25, B-3): на вопрос «по MDD» ответ опирался на статью Википедии о
+// семействе, а не на фрагменты MDD.
+const citeLeadRule = `База знаний (kb_search) — снимок статей справочника и MDD v2.5. Если сразу после реплики человека стоит выдача kb_search, это вызов кодом до твоего первого шага: опирайся на неё. Если среди твоих инструментов есть kb_answer — ход заканчивай только им, не текстом, и отвечай только по выдаче kb_search этого хода или прошлых ходов разговора (других источников на этом ходе нет: карточки, Википедию и GBIF не процитировать). Вопрос «по MDD» — опора на фрагменты mdd-carnivora; статьи Википедии о систематике могут отставать от релиза. Поля kb_answer:
 - answer — кратко, без ссылок [chunk_id]; sources — chunk_id фрагментов из выдачи; quotes — куски текста фрагментов, скопированные ДОСЛОВНО (не короче 15 символов, пропуск — «…»); числа ответа — только из цитат;
 - ответа в выдаче нет (можно сначала вызвать kb_search другими словами) — status unknown: в answer — чего нет в базе знаний, в clarify — уточняющий вопрос человеку, в sources — 1–3 ближайших найденных фрагмента;
 - kb_search пометил, что релевантных фрагментов нет, — ответ по существу kb_answer примет, только если другой kb_search этого хода их найдёт;
@@ -54,17 +58,50 @@ const citeLeadRule = `База знаний (kb_search) — снимок ста�
 // (v25, Meta): отвечать по памяти задачи и истории, а не по базе.
 const metaRule = `Реплика человека — о самом разговоре (цель, договорённости, что уже выяснили), а не о животных: ответь кратко по блоку задачи разговора и истории — цель, принятые ограничения и термины, что уже разобрали. Базу знаний для этого не ищи. Если цели нет ни в блоке, ни в истории — так и скажи.`
 
-// metaRe — признаки реплики о самом разговоре: «напомни, какая у нас
-// цель», «что мы решили», «подведи итог». \b в RE2 знает только латиницу,
+// metaRe — признаки реплики о самом разговоре: «что мы решили», «какие
+// ограничения мы приняли», «подведи итог». \b в RE2 знает только латиницу,
 // поэтому границы слова — классом букв.
-var metaRe = regexp.MustCompile(`(?i)((^|[^\p{L}])цел(ь|и|ью)([^\p{L}]|$)|что мы (уже )?(решили|договорились|выяснили|обсудили)|о ч[её]м мы (говорили|договорились)|подведи итог|на ч[её]м мы остановились)`)
+var metaRe = regexp.MustCompile(`(?i)(мы (уже )?(решили|договорились|выяснили|обсудили|приняли|условились)|о ч[её]м мы (говорили|договорились)|подведи итог|на ч[её]м мы остановились|что я (просил|хотел|спрашивал) в начале|какая (была|у нас) задача)`)
+
+// goalRe — слово «цель» в любой форме. Само по себе о разговоре не
+// говорит: «с какой целью ирбис метит территорию», «цель охоты волка» —
+// вопросы о животных. Засчитывается только вместе с признаком разговора
+// (convRe).
+var goalRe = regexp.MustCompile(`(?i)(^|[^\p{L}])цел(ь|и|ью|ей|ям)([^\p{L}]|$)`)
+
+// convRe — признак того, что речь о самом разговоре: «напомни», «наш», «у
+// нас», «мы», «разговор», «задача», «договорились».
+var convRe = regexp.MustCompile(`(?i)напомни|(^|[^\p{L}])(наш\p{L}*|у нас|мы)([^\p{L}]|$)|разговор|задач|договорил`)
+
+// animalAskRe — вопрос о животном в той же реплике: «напомни цель и
+// скажи, сколько весит манул» — смешанная реплика, по памяти задачи на неё
+// не ответить. Вид корпуса в реплике проверяет MetaWith по словарю; здесь —
+// вопросы без названия («и сколько он весит?»).
+var animalAskRe = regexp.MustCompile(`(?i)сколько (он|она|оно|они)?\s*(весит|весят|живет|живёт|живут)|где (он|она|они)?\s*(живет|живёт|живут|обитает|обитают|водится|водятся)|чем (он|она|они)?\s*(питается|питаются)|какой статус|на кого (он|она|они)?\s*охот`)
 
 // Meta — реплика о самом разговоре, а не о животных. При rag.cite такой
 // ход идёт без kb_answer: в базе знаний цели разговора нет, и Gate по
 // выдаче kb_search («релевантных фрагментов нет») оставил бы ведущему
 // только «не знаю» — контрольная реплика «напомни цель» теряла бы цель.
 // Источник такого ответа — память задачи и история (CiteView.Meta).
-func Meta(text string) bool { return metaRe.MatchString(strings.ToLower(text)) }
+//
+// «Цель» засчитывается только с признаком разговора (convRe); реплика с
+// вопросом о животном (animalAskRe) — не о разговоре, даже если в ней
+// «напомни цель». Вид, названный в реплике, проверяет MetaWith: Meta его
+// не знает (словаря нет).
+func Meta(text string) bool { return MetaWith(text, nil) }
+
+// MetaWith — Meta со словарём названий: реплика, где назван вид корпуса
+// («что мы уже выяснили о питании манула?»), — вопрос о животном, а не о
+// разговоре. names == nil — без этой проверки.
+func MetaWith(text string, names *retrieve.Aliases) bool {
+	l := strings.ToLower(text)
+	meta := metaRe.MatchString(l) || (goalRe.MatchString(l) && convRe.MatchString(l))
+	if !meta || animalAskRe.MatchString(l) {
+		return false
+	}
+	return names == nil || len(names.Species(text)) == 0
+}
 
 // hintNoKB — что сделать, если базы нет.
 const hintNoKB = "соберите базу: go run ./cmd/kb index -strategy all (путь к другой базе — флаг -kb или KB_DB)"
@@ -176,8 +213,16 @@ func (h *Hook) Before(ctx context.Context, t *runs.Turn) error {
 		return nil
 	}
 	if t.Features.On(features.RAGCite) && Meta(t.Request.Text) {
-		h.meta(t)
-		return nil
+		// Вид в реплике — вопрос о животном, а не о разговоре: словарь
+		// грузится только для реплик, похожих на реплику о разговоре.
+		names, err := h.pipeline().Names(ctx)
+		if err != nil {
+			names = nil
+		}
+		if MetaWith(t.Request.Text, names) {
+			h.meta(t)
+			return nil
+		}
 	}
 	index, k := orIndex(h.Index), orK(h.K)
 	names, cfg, piped := mechanisms(t)
@@ -269,12 +314,14 @@ func (h *Hook) cite(ctx context.Context, t *runs.Turn, obs *issued, piped bool, 
 			gateLine = "«только не знаю» — по пустой выдаче (словаря названий нет: без якоря порог не применить)"
 		}
 	}
-	fin := FinisherOf(FinishOptions{Hits: obs.Hits, Gate: obs.Gate, Question: text, Names: names})
+	past := h.past(t)
+	fin := FinisherOf(FinishOptions{Hits: obs.Hits, Gate: obs.Gate, Question: text, Names: names, Past: past.hit})
 	inner := fin.Handle
 	fin.Handle = func(ctx context.Context, callID string, args json.RawMessage) (any, error) {
 		res, err := inner(ctx, callID, args)
 		if r, ok := res.(*CitedResult); ok && err == nil {
 			t.Extra(string(features.RAGCite), ViewOf(r))
+			t.Extra(IssuedKey, obs.IDs())
 		}
 		return res, err
 	}
@@ -283,6 +330,7 @@ func (h *Hook) cite(ctx context.Context, t *runs.Turn, obs *issued, piped bool, 
 		_, _, rel := obs.Gate()
 		r := UnverifiedResult(err, obs.Hits(), rel)
 		t.Extra(string(features.RAGCite), ViewOf(r))
+		t.Extra(IssuedKey, obs.IDs())
 		t.Em.Log(agent.Event{Agent: HookName, Kind: agent.EventMechanism, Mechanism: string(features.RAGCite), Tool: FinishName,
 			Title:  "ответ с источниками: ход ведущего оборвался без kb_answer — человеку «не знаю» с пометкой «не проверено»",
 			Detail: "Причина: " + err.Error() + ".\nПроверенного ответа нет: вместо ошибки хода — «Не знаю: " + unverifiedAnswer + "», уточняющий вопрос и ближайшее найденное в базе."})
@@ -290,10 +338,73 @@ func (h *Hook) cite(ctx context.Context, t *runs.Turn, obs *issued, piped bool, 
 	}
 	t.Em.Log(agent.Event{Agent: HookName, Kind: agent.EventMechanism, Mechanism: string(features.RAGCite), Tool: FinishName,
 		Title: "ответ с источниками: ведущий заканчивает ход только kb_answer; " + gateLine,
-		Detail: "Код проверит ответ до человека: chunk_id — из выдачи kb_search этого хода, у ответа есть источник и цитата, " +
+		Detail: "Код проверит ответ до человека: chunk_id — из выдачи kb_search этого хода" + past.line() + ", у ответа есть источник и цитата, " +
 			"каждая цитата — дословный кусок своего фрагмента, числа ответа стоят в цитатах. Не прошло — отказ с подсказкой и ещё " +
 			fmt.Sprintf("один запрос ведущего; после %d отказов ответ принимается с пометкой «не проверено». ", MaxRejects) +
 			"Карточки, Википедия и GBIF на этом ходе ведущему не выданы: ответ — только по базе знаний."})
+}
+
+// IssuedKey — ключ итогов хода (Extras): chunk_id, которые выдал kb_search
+// этого хода при rag.cite. По ним kb_answer следующих ходов ветки принимает
+// источник из прошлого хода (Hook.past).
+const IssuedKey = "rag.issued"
+
+// pastIssued — фрагменты, выданные kb_search в прошлых ходах ветки.
+type pastIssued struct {
+	ids   map[string]bool
+	store *kb.Store
+}
+
+// past — chunk_id прошлых ходов ветки: из итогов хода IssuedKey, а у ходов,
+// записанных до v25, — источники ответа rag.cite, которые выдавались в своём
+// ходе (CiteViewSrc.Issued). Текст фрагмента — из базы (kb.Store.Chunk):
+// цитата сверяется с ним так же дословно, как с выдачей хода.
+func (h *Hook) past(t *runs.Turn) *pastIssued {
+	p := &pastIssued{ids: map[string]bool{}}
+	if h.Searcher != nil {
+		p.store = h.Searcher.Store
+	}
+	if t.Conv == nil {
+		return p
+	}
+	for _, turn := range t.Conv.PathTurns(t.Branch) {
+		var ids []string
+		if turn.Extra(IssuedKey, &ids) {
+			for _, id := range ids {
+				p.ids[id] = true
+			}
+			continue
+		}
+		var v CiteView
+		if turn.Extra(string(features.RAGCite), &v) {
+			for _, s := range v.Sources {
+				if s.Issued {
+					p.ids[s.ChunkID] = true
+				}
+			}
+		}
+	}
+	return p
+}
+
+// hit — фрагмент прошлого хода по chunk_id (FinishOptions.Past).
+func (p *pastIssued) hit(ctx context.Context, id string) (kb.Hit, bool) {
+	if p == nil || p.store == nil || !p.ids[id] {
+		return kb.Hit{}, false
+	}
+	c, err := p.store.Chunk(ctx, id)
+	if err != nil {
+		return kb.Hit{}, false
+	}
+	return kb.Hit{Chunk: c}, true
+}
+
+// line — для журнала: сколько фрагментов прошлых ходов примет kb_answer.
+func (p *pastIssued) line() string {
+	if p == nil || len(p.ids) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" или прошлых ходов ветки (%d фрагментов; цитата сверяется с текстом фрагмента из базы)", len(p.ids))
 }
 
 // plainGate — Gate вызова kb_search без конвейера: трасса из выдачи —
@@ -339,7 +450,9 @@ type CiteViewSrc struct {
 	ChunkID string `json:"chunk_id"`
 	Title   string `json:"title,omitempty"`
 	Path    string `json:"path,omitempty"`
-	Issued  bool   `json:"issued"` // выдавался в этом ходе
+	Issued  bool   `json:"issued"` // выдавался в этом ходе или в прошлом (Past)
+	// Past — выдавался kb_search в прошлом ходе ветки, а не в этом (v25).
+	Past bool `json:"past,omitempty"`
 }
 
 // ViewOf — CiteView принятого ответа. У «не знаю» источники — ближайшее
@@ -359,7 +472,7 @@ func ViewOf(r *CitedResult) CiteView {
 		seen[id] = true
 		s := CiteViewSrc{N: len(v.Sources) + 1, ChunkID: id}
 		if h, ok := byID[id]; ok {
-			s.Title, s.Path, s.Issued = h.Title, pathOf(h.Chunk), true
+			s.Title, s.Path, s.Issued, s.Past = h.Title, pathOf(h.Chunk), true, r.Past[id]
 		}
 		v.Sources = append(v.Sources, s)
 	}
@@ -401,6 +514,10 @@ const MetaSource = "память задачи и история разговор
 // допишет After): окно и kb chat показывают, откуда ответ.
 func (h *Hook) meta(t *runs.Turn) {
 	t.Request.Rules = join(t.Request.Rules, metaRule)
+	// Ответ — по памяти задачи и истории: Википедия, GBIF и карточки на
+	// этом ходе ведущему не выдаются (как на ходе с kb_answer) — иначе
+	// «напомни цель» уходило в источники по виду из истории.
+	t.Request.NoSources = true
 	t.Extra(string(features.RAGCite), CiteView{Meta: true, MetaSource: MetaSource})
 	t.Em.Log(agent.Event{Agent: HookName, Kind: agent.EventMechanism, Mechanism: string(features.RAGCite),
 		Title: "ответ с источниками: реплика о самом разговоре — ответ по памяти задачи и истории, без kb_answer",

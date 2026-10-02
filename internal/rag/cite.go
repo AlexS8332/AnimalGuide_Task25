@@ -120,6 +120,11 @@ type CiteCheck struct {
 	// Мягкая метрика: отказа нет — ответ о двух видах с цитатой об одном
 	// бывает честным («о соболе в базе нет»).
 	SpeciesMismatch []string `json:"species_mismatch,omitempty"`
+	// Grounded — числа ответа стоят в цитатах и виды ответа совпадают с
+	// источниками цитат (NumbersMissing и SpeciesMismatch пусты; у «не знаю»
+	// — всегда). Принятый ответ без опоры (после мягкого отказа за числа)
+	// окно и kb chat помечают по этому полю.
+	Grounded bool `json:"grounded"`
 	// Gated, GateReason — код решил «только unknown» в момент приёма ответа
 	// (Gate по выдаче хода) и почему.
 	Gated      bool   `json:"gated,omitempty"`
@@ -189,6 +194,7 @@ func CheckWith(c Cited, hits []kb.Hit, o CheckOptions) CiteCheck {
 		if strings.TrimSpace(c.Clarify) == "" {
 			problem("status unknown без уточняющего вопроса: заполни clarify — что человеку уточнить (по ближайшему, что нашлось во фрагментах)")
 		}
+		ck.Grounded = true
 		ck.OK = len(ck.Problems) == 0
 		return ck
 	case StatusAnswered:
@@ -252,6 +258,7 @@ func CheckWith(c Cited, hits []kb.Hit, o CheckOptions) CiteCheck {
 	}
 	ck.NumbersMissing = numbersMissing(c, o.Question)
 	ck.SpeciesMismatch = speciesMismatch(c, byID, o.Names)
+	ck.Grounded = len(ck.NumbersMissing) == 0 && len(ck.SpeciesMismatch) == 0
 	if strictNumbers && len(ck.NumbersMissing) > 0 {
 		problem("чисел ответа %s нет ни в одной цитате: добавь цитату, где они стоят, или убери их из ответа; "+
 			"если число взято из вопроса или вычислено из цитат (разница, сумма) — повтори вызов без изменений",
@@ -554,6 +561,55 @@ type FinishOptions struct {
 	Question string
 	// Names — словарь названий для метрики SpeciesMismatch; nil — без неё.
 	Names *retrieve.Aliases
+	// Past — фрагмент, выданный kb_search в прошлом ходе ветки (v25): chunk_id
+	// ответа, которого нет в выдаче этого хода, ищется здесь, и цитата
+	// сверяется с текстом фрагмента так же дословно. nil — только выдача хода.
+	Past func(ctx context.Context, id string) (kb.Hit, bool)
+}
+
+// withPast — выдача хода и фрагменты прошлых ходов, на которые ссылается
+// ответ (FinishOptions.Past), и множество последних.
+func withPast(ctx context.Context, c Cited, hs []kb.Hit, past func(ctx context.Context, id string) (kb.Hit, bool)) ([]kb.Hit, map[string]bool) {
+	if past == nil {
+		return hs, nil
+	}
+	have := make(map[string]bool, len(hs))
+	for _, h := range hs {
+		have[h.ID] = true
+	}
+	var from map[string]bool
+	ids := make([]string, 0, len(c.Sources)+len(c.Quotes))
+	for _, x := range c.Sources {
+		ids = append(ids, x.ChunkID)
+	}
+	for _, q := range c.Quotes {
+		ids = append(ids, q.ChunkID)
+	}
+	out := hs
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" || have[id] {
+			continue
+		}
+		have[id] = true
+		if h, ok := past(ctx, id); ok {
+			if from == nil {
+				from, out = map[string]bool{}, append([]kb.Hit(nil), hs...)
+			}
+			from[id] = true
+			out = append(out, h)
+		}
+	}
+	return out, from
+}
+
+// mismatchProblem — отказ за ответ, у которого и числа без цитаты, и вид не
+// из источника: цитата из статьи о другом виде («сколько весит харза» с
+// цитатой о соболе). Мягкого режима для чисел здесь нет — ответ держится не
+// на той статье, и правка — новый поиск по виду.
+func mismatchProblem(species, numbers []string) string {
+	return fmt.Sprintf("чисел ответа %s нет в цитатах, а цитаты не из статьи о виде %s: вызови kb_search «%s <о чём вопрос>» и процитируй фрагмент о нём; нет такого фрагмента — status unknown",
+		strings.Join(numbers, ", "), strings.Join(species, ", "), species[0])
 }
 
 // maxNearest — сколько «ближайших в базе» источников у «не знаю».
@@ -601,6 +657,7 @@ func FinisherOf(o FinishOptions) agent.Finisher {
 				hs = o.Hits()
 			}
 			gated, why, rel := o.OnlyUnknown, o.Why, hs
+			var past map[string]bool
 			switch {
 			case o.OnlyUnknown:
 				rel = nil
@@ -628,7 +685,7 @@ func FinisherOf(o FinishOptions) agent.Finisher {
 					ck.HasSources = len(c.Sources) > 0
 					ck.Forced = gated
 				}
-				return &CitedResult{Cited: c, Check: ck, Hits: hs}, nil
+				return &CitedResult{Cited: c, Check: ck, Hits: hs, Past: past}, nil
 			}
 			if err := json.Unmarshal(args, &c); err != nil {
 				problem := fmt.Sprintf("аргументы kb_answer не разобраны (%v): передай JSON {status, answer, sources, quotes, clarify}", err)
@@ -655,8 +712,30 @@ func FinisherOf(o FinishOptions) agent.Finisher {
 				ck.Problems = append(ck.Problems, onlyUnknownProblem+" — модель ответила по существу, ответ заменён на «не знаю»")
 				return accept(ck)
 			}
+			// Фрагменты прошлых ходов ветки: только те, на которые ссылается
+			// ответ, и только для сверки (Gate хода они не меняют).
+			hs, past = withPast(ctx, c, hs, o.Past)
 			co := CheckOptions{StrictNumbers: !numbersRejected, Question: o.Question, Names: o.Names}
 			ck := CheckWith(c, hs, co)
+			if len(ck.NumbersMissing) > 0 && len(ck.SpeciesMismatch) > 0 {
+				// Числа без цитаты и вид не из источника — не мягкая
+				// проверка: отказ с подсказкой в счёт MaxRejects (а не
+				// подсказка один раз). После MaxRejects — приём без опоры
+				// (Grounded = false, пометка «⚠» у окна и kb chat), как у
+				// мягкого приёма чисел; «не проверено» — только если не прошло
+				// и остальное (цитаты, chunk_id).
+				soft := co
+				soft.StrictNumbers = false
+				ck = CheckWith(c, hs, soft)
+				if rejects < MaxRejects {
+					return nil, reject(append(ck.Problems, mismatchProblem(ck.SpeciesMismatch, ck.NumbersMissing))...)
+				}
+				if !ck.OK {
+					ck.Unverified = true
+					ck.Problems = append(ck.Problems, mismatchProblem(ck.SpeciesMismatch, ck.NumbersMissing))
+				}
+				return accept(ck)
+			}
 			if ck.OK {
 				return accept(ck)
 			}
@@ -737,6 +816,8 @@ type CitedResult struct {
 	Cited Cited     `json:"cited"`
 	Check CiteCheck `json:"check"`
 	Hits  []kb.Hit  `json:"-"`
+	// Past — chunk_id из Hits, выданные в прошлых ходах ветки, а не в этом.
+	Past map[string]bool `json:"-"`
 }
 
 // Text — ответ человеку. Не прошедший проверку (Unverified) — с пометкой

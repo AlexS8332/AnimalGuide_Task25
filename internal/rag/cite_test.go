@@ -635,3 +635,86 @@ func TestEvalCite(t *testing.T) {
 		t.Fatalf("отчёт:\n%s", conc)
 	}
 }
+
+// Числа без цитаты И вид не из источника: не мягкий режим — отказ с
+// подсказкой «вызови kb_search «харза …»» в счёт MaxRejects, после — приём
+// без опоры (Grounded = false; цитаты дословны — не «не проверено»). Только числа — прежний мягкий режим: подсказка один раз,
+// затем приём с NumbersMissing и Grounded = false.
+func TestFinisherSpeciesAndNumbers(t *testing.T) {
+	ctx := context.Background()
+	al := retrieve.AliasesOf([]corpus.Doc{
+		{ID: "kharza", Title: "Харза", Species: &corpus.Species{Ru: "харза"}},
+		{ID: "sable", Title: "Соболь", Species: &corpus.Species{Ru: "соболь"}},
+	})
+	sable := kb.Hit{Chunk: kb.Chunk{ID: "sable/structure/003", DocID: "sable", Title: "Соболь", Text: "Масса самцов соболя — от 880 до 1800 г."}}
+	hits := func() []kb.Hit { return []kb.Hit{sable} }
+	both := cited("Харза весит до 5 кг.", []string{sable.ID}, [2]string{sable.ID, "Масса самцов соболя — от 880 до 1800 г."})
+
+	f := FinisherOf(FinishOptions{Hits: hits, Names: al})
+	for i := 0; i < MaxRejects; i++ {
+		_, err := f.Handle(ctx, "c", args(both))
+		if err == nil || !strings.Contains(err.Error(), "вызови kb_search «харза") {
+			t.Fatalf("отказ %d: %v", i+1, err)
+		}
+	}
+	res, err := f.Handle(ctx, "c", args(both))
+	r, _ := res.(*CitedResult)
+	if err != nil || r == nil || r.Check.Unverified || !r.Check.OK || r.Check.Grounded || r.Check.Rejects != MaxRejects ||
+		strings.Join(r.Check.SpeciesMismatch, ",") != "харза" || strings.Join(r.Check.NumbersMissing, ",") != "5" {
+		t.Fatalf("приём после отказов: %+v %v", res, err)
+	}
+
+	// Только числа (вид свой): подсказка один раз, не в счёт отказов.
+	own := cited("Соболь весит до 2 кг.", []string{sable.ID}, [2]string{sable.ID, "Масса самцов соболя — от 880 до 1800 г."})
+	f = FinisherOf(FinishOptions{Hits: hits, Names: al})
+	if _, err := f.Handle(ctx, "c", args(own)); err == nil || strings.Contains(err.Error(), "вызови kb_search") {
+		t.Fatalf("мягкий отказ: %v", err)
+	}
+	res, err = f.Handle(ctx, "c", args(own))
+	r, _ = res.(*CitedResult)
+	if err != nil || r == nil || !r.Check.OK || r.Check.Unverified || r.Check.Grounded || r.Check.Rejects != 0 {
+		t.Fatalf("мягкий приём: %+v %v", res, err)
+	}
+	// Опора полная — Grounded.
+	ok := cited("Соболь весит от 880 до 1800 г.", []string{sable.ID}, [2]string{sable.ID, "Масса самцов соболя — от 880 до 1800 г."})
+	res, err = FinisherOf(FinishOptions{Hits: hits, Names: al}).Handle(ctx, "c", args(ok))
+	if r, _ = res.(*CitedResult); err != nil || r == nil || !r.Check.OK || !r.Check.Grounded {
+		t.Fatalf("с опорой: %+v %v", res, err)
+	}
+}
+
+// Фрагмент прошлого хода (FinishOptions.Past): chunk_id не из выдачи хода
+// принимается, если Past его знает, — с той же дословной сверкой цитаты.
+func TestFinisherPastChunks(t *testing.T) {
+	ctx := context.Background()
+	hits := citeHits()
+	old := kb.Hit{Chunk: kb.Chunk{ID: "manul/structure/004", DocID: "manul", Title: "Манул", Text: "Манул питается в основном пищухами и мелкими грызунами."}}
+	past := func(ctx context.Context, id string) (kb.Hit, bool) {
+		if id == old.ID {
+			return old, true
+		}
+		return kb.Hit{}, false
+	}
+	good := cited("Манул ест пищух.", []string{old.ID}, [2]string{old.ID, "питается в основном пищухами"})
+	res, err := FinisherOf(FinishOptions{Hits: func() []kb.Hit { return hits }, Past: past}).Handle(ctx, "c", args(good))
+	r, _ := res.(*CitedResult)
+	if err != nil || r == nil || !r.Check.OK || !r.Past[old.ID] || len(r.Hits) != 3 {
+		t.Fatalf("прошлый ход: %+v %v", res, err)
+	}
+	v := ViewOf(r)
+	if len(v.Sources) != 1 || !v.Sources[0].Issued || !v.Sources[0].Past || v.Sources[0].Title != "Манул" {
+		t.Fatalf("источник прошлого хода: %+v", v.Sources)
+	}
+	// Цитата не дословна — отказ, как у выдачи хода.
+	bad := cited("Манул ест пищух.", []string{old.ID}, [2]string{old.ID, "манул ест одних пищух"})
+	if _, err := FinisherOf(FinishOptions{Hits: func() []kb.Hit { return hits }, Past: past}).Handle(ctx, "c", args(bad)); err == nil ||
+		!strings.Contains(err.Error(), "не найдена во фрагменте") {
+		t.Fatalf("недословная цитата прошлого хода: %v", err)
+	}
+	// Past не знает chunk_id — «не выдавались».
+	other := cited("Ирбис живёт в горах.", []string{"snow-leopard/structure/001"}, [2]string{"snow-leopard/structure/001", "живёт высоко в горах Азии"})
+	if _, err := FinisherOf(FinishOptions{Hits: func() []kb.Hit { return hits }, Past: past}).Handle(ctx, "c", args(other)); err == nil ||
+		!strings.Contains(err.Error(), "не выдавались") {
+		t.Fatalf("чужой chunk_id: %v", err)
+	}
+}

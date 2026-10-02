@@ -3,6 +3,7 @@ package rag
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -306,5 +307,48 @@ func TestHookCiteFinishFail(t *testing.T) {
 	}
 	if !logged || len(r.lead) != 1+agent.MaxReminders {
 		t.Fatalf("журнал %v, запросов ведущего %d", logged, len(r.lead))
+	}
+}
+
+// Источник из прошлого хода ветки (v25): kb_answer второго хода цитирует
+// фрагмент, выданный kb_search в первом, — chunk_id принят (итоги первого
+// хода, ключ IssuedKey), цитата сверена с текстом фрагмента из базы.
+func TestHookCitePastTurn(t *testing.T) {
+	var first Cited
+	var second []SearchHit
+	r := newCiteChat(t, &Hook{Searcher: searcher(t)}, func(req llm.Request, step int) llm.Response {
+		if first.Status == "" {
+			first = verbatim(t, req)
+			return llmtest.ToolCall(FinishName, string(args(first)))
+		}
+		second = issuedHits(t, req)
+		return llmtest.ToolCall(FinishName, string(args(first)))
+	})
+	s, err := r.m.Start(runs.StartOptions{Request: agents.Request{Text: "Сколько часов в день кошачий медведь тратит на еду?"}, Features: citeSet()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1 := s.Wait(20 * time.Second)
+	s, err = r.m.Send(v1.ConversationID, agents.Request{Text: "Где живёт харза?"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := s.Wait(20 * time.Second); v.Status != runs.StatusDone {
+		t.Fatalf("второй ход: %+v", v)
+	}
+	for _, h := range second {
+		if h.ChunkID == first.Sources[0].ChunkID {
+			t.Fatalf("фрагмент первого хода есть и в выдаче второго: %s", h.ChunkID)
+		}
+	}
+	d, _ := r.m.Get(v1.ConversationID)
+	var ids []string
+	if !d.TurnList[0].Extra(IssuedKey, &ids) || !slices.Contains(ids, first.Sources[0].ChunkID) {
+		t.Fatalf("выдача первого хода в итогах: %v", ids)
+	}
+	var v CiteView
+	if !d.TurnList[1].Extra(string(features.RAGCite), &v) || !v.Check.OK || v.Check.Rejects != 0 || len(v.Sources) != 1 ||
+		!v.Sources[0].Past || v.Sources[0].Title == "" {
+		t.Fatalf("второй ход: %+v", v)
 	}
 }
