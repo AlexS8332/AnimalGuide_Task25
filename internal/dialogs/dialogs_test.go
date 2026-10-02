@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AlexS8332/AnimalGuide_Task25/internal/features"
+	"github.com/AlexS8332/AnimalGuide_Task25/internal/history"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/rag"
 )
 
@@ -252,5 +254,23 @@ func TestPlayAndReport(t *testing.T) {
 	}
 	if (Report{}).Passed() {
 		t.Error("пустой отчёт пройден")
+	}
+}
+
+// Наблюдение из записи хода: ответ, итог rag.cite; незавершённый ход —
+// ошибка даже без её текста.
+func TestFromTurn(t *testing.T) {
+	tr := history.Turn{ID: "t1", Status: history.TurnDone, Route: "lead", Reply: "Ответ."}
+	tr.SetExtra(string(features.RAGCite), rag.CiteView{Cited: rag.Cited{Status: rag.StatusAnswered, Answer: "Ответ."},
+		Sources: []rag.CiteViewSrc{{N: 1, ChunkID: "manul/structure/001"}}})
+	o := FromTurn(tr)
+	if o.TurnID != "t1" || o.Route != "lead" || o.Status() != "answered" || len(o.Docs()) != 1 || o.Docs()[0] != "manul" {
+		t.Fatalf("ход: %+v", o)
+	}
+	if o := FromTurn(history.Turn{Status: history.TurnFailed}); o.Status() != "error" || o.Cite != nil {
+		t.Fatalf("неудачный ход: %+v", o)
+	}
+	if o := FromTurn(history.Turn{Status: history.TurnDone, Reply: "Карточка."}); o.Status() != "none" {
+		t.Fatalf("без rag.cite: %+v", o)
 	}
 }

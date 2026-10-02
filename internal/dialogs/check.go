@@ -7,6 +7,8 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/AlexS8332/AnimalGuide_Task25/internal/features"
+	"github.com/AlexS8332/AnimalGuide_Task25/internal/history"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/profile"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/rag"
 )
@@ -20,6 +22,22 @@ type Observed struct {
 	Reply  string        `json:"reply"`
 	Error  string        `json:"error,omitempty"`
 	Cite   *rag.CiteView `json:"cite,omitempty"`
+}
+
+// FromTurn — наблюдение из записи хода в истории диалога: то же, что kb
+// chat собирает по REST (ответ, ошибка, итог rag.cite), но без сервера —
+// для стенда, который ходит в менеджер ходов напрямую. Незавершённый ход
+// без текста ошибки — ошибка со статусом хода.
+func FromTurn(t history.Turn) Observed {
+	o := Observed{TurnID: t.ID, Route: t.Route, Reply: t.Reply, Error: t.Error}
+	if t.Status != history.TurnDone && strings.TrimSpace(o.Error) == "" {
+		o.Error = "ход не завершён (" + orDash(t.Status) + ")"
+	}
+	var v rag.CiteView
+	if t.Extra(string(features.RAGCite), &v) {
+		o.Cite = &v
+	}
+	return o
 }
 
 // Status — как ответил ход: answered (по базе), unknown («не знаю»), meta
