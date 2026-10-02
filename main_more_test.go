@@ -49,9 +49,10 @@ func TestParseFlagsDefaults(t *testing.T) {
 // Флаги разбираются все, включая набор механизмов.
 func TestParseFlagsAll(t *testing.T) {
 	withArgs(t, "-addr", "127.0.0.1:9999", "-open=false", "-data", "d", "-features", "+mcp,-guard",
-		"-window", "7", "-keep-tools", "100", "-context-limit", "0", "-on-overflow", "trim")
+		"-window", "7", "-keep-tools", "100", "-context-limit", "0", "-on-overflow", "trim", "-preset", "rag")
 	o := parseFlags()
 	want := options{addr: "127.0.0.1:9999", data: "d", featureSpec: "+mcp,-guard", overflow: "trim", open: false, window: 7, keep: 100, limit: 0,
+		preset: "rag", windowSet: true,
 		trials: "all", reportOut: filepath.Join("examples", "report.md"), factsServer: feed.DefaultServer}
 	if o != want {
 		t.Fatalf("флаги: %+v", o)

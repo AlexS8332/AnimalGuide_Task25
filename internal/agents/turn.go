@@ -133,6 +133,20 @@ func Classify(text string, cards card.State) (kind, a, b string) {
 	return KindMessage, "", ""
 }
 
+// Route — маршрут реплики с учётом механизмов хода. При rag.cite (режим
+// «справочная по базе») реплика человека всегда идёт ведущему: голое
+// название и «сравни X и Y» тоже — карточка и сравнение строятся из
+// Википедии и GBIF, источников из базы знаний у них нет, а ответ
+// справочной обязан их показать (kb_answer). Кнопочные ходы (раздел
+// карточки, узел дерева, клик по соседу) сюда не попадают — у них свой
+// Kind и прежний путь.
+func Route(text string, cards card.State, fs features.Set) (kind, a, b string) {
+	if fs.On(features.RAGCite) {
+		return KindMessage, "", ""
+	}
+	return Classify(text, cards)
+}
+
 // resolve — «её» и «его» означают текущую карточку.
 func resolve(name string, cards card.State) string {
 	name = strings.Trim(strings.TrimSpace(name), "«»\".,")
@@ -184,7 +198,9 @@ func Run(ctx context.Context, d Deps, req Request, em agent.Emitter) (Result, er
 	name := req.Name
 	if kind == KindMessage || kind == "" {
 		var x, y string
-		kind, x, y = Classify(req.Text, t.state())
+		// Набор хода — после хуков: rag без базы откатывает и rag.cite,
+		// и тогда голое название снова ведёт к карточке.
+		kind, x, y = Route(req.Text, t.state(), req.Features)
 		switch kind {
 		case KindOpen:
 			name = x

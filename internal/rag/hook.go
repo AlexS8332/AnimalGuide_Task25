@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -49,6 +50,22 @@ const citeLeadRule = `База знаний (kb_search) — снимок ста�
 - kb_search пометил, что релевантных фрагментов нет, — ответ по существу kb_answer примет, только если другой kb_search этого хода их найдёт;
 - kb_answer вернул ошибку — исправь названное и вызови снова.`
 
+// metaRule — правило ведущего на реплике о самом разговоре при rag.cite
+// (v25, Meta): отвечать по памяти задачи и истории, а не по базе.
+const metaRule = `Реплика человека — о самом разговоре (цель, договорённости, что уже выяснили), а не о животных: ответь кратко по блоку задачи разговора и истории — цель, принятые ограничения и термины, что уже разобрали. Базу знаний для этого не ищи. Если цели нет ни в блоке, ни в истории — так и скажи.`
+
+// metaRe — признаки реплики о самом разговоре: «напомни, какая у нас
+// цель», «что мы решили», «подведи итог». \b в RE2 знает только латиницу,
+// поэтому границы слова — классом букв.
+var metaRe = regexp.MustCompile(`(?i)((^|[^\p{L}])цел(ь|и|ью)([^\p{L}]|$)|что мы (уже )?(решили|договорились|выяснили|обсудили)|о ч[её]м мы (говорили|договорились)|подведи итог|на ч[её]м мы остановились)`)
+
+// Meta — реплика о самом разговоре, а не о животных. При rag.cite такой
+// ход идёт без kb_answer: в базе знаний цели разговора нет, и Gate по
+// выдаче kb_search («релевантных фрагментов нет») оставил бы ведущему
+// только «не знаю» — контрольная реплика «напомни цель» теряла бы цель.
+// Источник такого ответа — память задачи и история (CiteView.Meta).
+func Meta(text string) bool { return metaRe.MatchString(strings.ToLower(text)) }
+
 // hintNoKB — что сделать, если базы нет.
 const hintNoKB = "соберите базу: go run ./cmd/kb index -strategy all (путь к другой базе — флаг -kb или KB_DB)"
 
@@ -63,8 +80,10 @@ const hintNoKB = "соберите базу: go run ./cmd/kb index -strategy all
 // выключен (как у trivia). Эмбеддер не отвечает — не откат механизма:
 // поиск сам уходит в BM25 и называет причину в ответе инструмента.
 //
-// Голые названия («манул») и «сравни» идут мимо ведущего (agents.Classify) —
-// база там не участвует; это предмет задания 25.
+// Голые названия («манул») и «сравни» без rag.cite идут мимо ведущего
+// (agents.Classify) — база там не участвует. С rag.cite (v25) маршрут
+// agents.Route отдаёт ведущему любую реплику: ответ справочной — всегда с
+// источниками из базы.
 //
 // Механизмы v23 rag.filter и rag.rewrite (требуют rag) переводят и вызов
 // кодом, и сам инструмент kb_search на конвейер retrieve (PipelineTool):
@@ -156,6 +175,10 @@ func (h *Hook) Before(ctx context.Context, t *runs.Turn) error {
 		h.off(t)
 		return nil
 	}
+	if t.Features.On(features.RAGCite) && Meta(t.Request.Text) {
+		h.meta(t)
+		return nil
+	}
 	index, k := orIndex(h.Index), orK(h.K)
 	names, cfg, piped := mechanisms(t)
 	// rag.cite: выдача хода копится (kb_answer проверяет по ней chunk_id и
@@ -207,7 +230,7 @@ func (h *Hook) Before(ctx context.Context, t *runs.Turn) error {
 		Detail: "Код поищет по базе знаний с репликой человека до первого запроса ведущего: выдача встанет после реплики, " +
 			"а не блоком перед историей, и кэш префикса окна не сбрасывается. Ведущему выдано правило: опираться на выдачу " +
 			"и называть [chunk_id]; нет ответа в выдаче — сказать об этом и при необходимости идти в Википедию или GBIF.\n" +
-			"Оговорка: голое название животного («манул») и «сравни …» идут мимо ведущего (карточка, сравнение) — " +
+			"Оговорка: без rag.cite голое название животного («манул») и «сравни …» идут мимо ведущего (карточка, сравнение) — " +
 			"запроса ведущего тогда нет, и вызова kb_search не будет. Сам вызов — отдельное событие журнала инструментов." + detail})
 	if cite {
 		h.cite(ctx, t, obs, piped, index, text)
@@ -304,6 +327,10 @@ type CiteView struct {
 	Gated      bool          `json:"gated,omitempty"`
 	GateReason string        `json:"gate_reason,omitempty"`
 	Sources    []CiteViewSrc `json:"sources,omitempty"`
+	// Meta — реплика о самом разговоре (v25, Meta): ответ без kb_answer, по
+	// памяти задачи и истории; MetaSource — как назвать этот источник.
+	Meta       bool   `json:"meta,omitempty"`
+	MetaSource string `json:"meta_source,omitempty"`
 }
 
 // CiteViewSrc — источник ответа с номером и заголовком из выдачи.
@@ -365,9 +392,33 @@ func (h *Hook) off(t *runs.Turn) {
 		Detail: "Ход идёт без kb_search: ведущий отвечает по источникам хода (Википедия, GBIF).\nЧто сделать: " + hintNoKB + "."})
 }
 
-// After — ничего: ответ rag.cite проверяет kb_answer во время хода, а
-// принятый результат пишет в Extras сам Finisher (Hook.cite).
-func (h *Hook) After(ctx context.Context, t *runs.Turn) error { return nil }
+// MetaSource — источник ответа на реплику о самом разговоре (CiteView.Meta).
+const MetaSource = "память задачи и история разговора"
+
+// meta — реплика о самом разговоре при rag.cite: без вызова kb_search
+// кодом и без kb_answer, правило — ответить по памяти задачи и истории.
+// В итогах хода — CiteView с Meta и источником MetaSource (текст ответа
+// допишет After): окно и kb chat показывают, откуда ответ.
+func (h *Hook) meta(t *runs.Turn) {
+	t.Request.Rules = join(t.Request.Rules, metaRule)
+	t.Extra(string(features.RAGCite), CiteView{Meta: true, MetaSource: MetaSource})
+	t.Em.Log(agent.Event{Agent: HookName, Kind: agent.EventMechanism, Mechanism: string(features.RAGCite),
+		Title: "ответ с источниками: реплика о самом разговоре — ответ по памяти задачи и истории, без kb_answer",
+		Detail: "Цели разговора и договорённостей в базе знаний нет: поиск по такой реплике не найдёт релевантных фрагментов, " +
+			"и kb_answer принял бы только «не знаю». Ход идёт без вызова kb_search кодом и без завершающего kb_answer; " +
+			"источник ответа — " + MetaSource + "."})
+}
+
+// After — ответ rag.cite проверяет kb_answer во время хода, а принятый
+// результат пишет в Extras сам Finisher (Hook.cite). Здесь — только текст
+// ответа на реплику о самом разговоре (Hook.meta).
+func (h *Hook) After(ctx context.Context, t *runs.Turn) error {
+	if v, ok := t.Extras[string(features.RAGCite)].(CiteView); ok && v.Meta && t.Result != nil {
+		v.Text = t.Result.Text
+		t.Extra(string(features.RAGCite), v)
+	}
+	return nil
+}
 
 func join(a, b string) string {
 	switch {

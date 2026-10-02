@@ -103,9 +103,12 @@ type startRequest struct {
 	turnRequest
 	// Features — механизмы нового диалога строкой флага: «+mcp,-guard»;
 	// пусто — умолчания сервера.
-	Features string   `json:"features"`
-	Owners   []string `json:"owners"`
-	Title    string   `json:"title"`
+	Features string `json:"features"`
+	// Preset — именованный набор механизмов (features.PresetRAG — «rag»,
+	// справочная по базе) поверх умолчаний сервера; Features — поверх него.
+	Preset string   `json:"preset"`
+	Owners []string `json:"owners"`
+	Title  string   `json:"title"`
 	// Empty — завести диалог без первого хода.
 	Empty bool `json:"empty"`
 }
@@ -119,7 +122,7 @@ func (s *Server) handleConversations(w http.ResponseWriter, r *http.Request) {
 		if !readJSON(w, r, &body) {
 			return
 		}
-		fs, err := s.runs.Registry().Parse(body.Features, s.runs.Defaults())
+		fs, err := s.runs.Registry().ParsePreset(body.Preset, body.Features, s.runs.Defaults())
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return

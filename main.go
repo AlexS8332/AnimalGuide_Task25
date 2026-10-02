@@ -53,9 +53,12 @@ const (
 // options — флаги запуска.
 type options struct {
 	addr, data, featureSpec, overflow string
-	mcpServer                         string
-	open                              bool
-	window, keep, limit               int
+	// preset — именованный набор механизмов новых диалогов (features.
+	// PresetRAG — «Справочная (RAG)»); -features ложится поверх него.
+	preset              string
+	mcpServer           string
+	open                bool
+	window, keep, limit int
 	// report — опыт -report вместо сервера: испытания и отчёт в markdown.
 	report            bool
 	trials, reportOut string
@@ -63,6 +66,9 @@ type options struct {
 	// он флагом явно (тогда и пустая строка — «выключено»).
 	factsServer string
 	factsSet    bool
+	// windowSet — задан ли -window явно: тогда он же и окно справочной по
+	// базе (rag.cite), иначе у неё своё умолчание (history.CiteWindow).
+	windowSet bool
 	// mcpConfig — конфигурация реестра MCP-серверов (окно «MCP-серверы»,
 	// длинный флоу); пусто — MCP_CONFIG, иначе встроенная.
 	mcpConfig string
@@ -100,7 +106,8 @@ func parseFlags() options {
 	flag.BoolVar(&o.open, "open", true, "открыть браузер при старте")
 	flag.StringVar(&o.data, "data", ".", "каталог данных: history, memory, profiles, collections, invariants")
 	flag.StringVar(&o.featureSpec, "features", "", "механизмы новых диалогов поверх умолчаний: «+mcp,-guard», «none,charter», «all»")
-	flag.IntVar(&o.window, "window", history.DefaultWindow, "сколько последних сообщений уходит модели дословно (механизм window)")
+	flag.StringVar(&o.preset, "preset", "", "пресет механизмов новых диалогов поверх умолчаний: rag — справочная по базе (rag, rag.filter, rag.rewrite, rag.cite, task); -features — поверх пресета")
+	flag.IntVar(&o.window, "window", history.DefaultWindow, "сколько последних сообщений уходит модели дословно (механизм window); у диалогов с rag.cite без этого флага — 12")
 	flag.IntVar(&o.keep, "keep-tools", history.DefaultKeepToolRunes, "до скольких символов сокращать ответы инструментов прошлых ходов (механизм compact)")
 	flag.IntVar(&o.limit, "context-limit", defaultContextLimit, "свой лимит контекста в токенах; 0 — не проверять")
 	flag.StringVar(&o.mcpServer, "mcp-server", "", "бинарник MCP-сервера источников (механизм mcp); пусто — рядом с приложением, в PATH или сборка из исходников")
@@ -114,8 +121,11 @@ func parseFlags() options {
 	flag.StringVar(&o.embedURL, "embedder", "", "адрес эмбеддера (OpenAI-совместимый /v1/embeddings: сайдкар embedder/, Ollama, облако); пусто — EMBED_BASE_URL, иначе http://127.0.0.1:8777")
 	flag.Parse()
 	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "facts-server" {
+		switch f.Name {
+		case "facts-server":
 			o.factsSet = true
+		case "window":
+			o.windowSet = true
 		}
 	})
 	return o
@@ -132,7 +142,7 @@ func main() {
 		fail(fmt.Errorf("неизвестный режим -on-overflow=%q; допустимы fail, trim, off", o.overflow))
 	}
 	registry := features.Catalog()
-	defaults, err := registry.Parse(o.featureSpec, registry.Defaults())
+	defaults, err := registry.ParsePreset(o.preset, o.featureSpec, registry.Defaults())
 	if err != nil {
 		fail(err)
 	}

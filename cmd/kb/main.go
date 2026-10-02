@@ -17,6 +17,8 @@
 //	kb matrix -k1 3,5,8 -rrf          # режимы base/filter/rewrite/both/hybrid → examples/rag/filter.md
 //	kb qa -modes rag,rag+both         # ответы с конвейером поиска v23
 //	kb qa -modes rag+both,rag+cite -splits test,out  # источники, цитаты и «не знаю» (v24)
+//	kb chat                           # мини-чат в терминале поверх запущенного приложения (go run . -preset rag)
+//	kb chat -script eval/dialogs/a.json -json > trace.jsonl  # длинный сценарий с проверками и трассой
 //	kb help [команда]                 # список команд или справка по одной
 //
 // Подкоманды регистрируются в своих файлах (cmd/kb/<команда>.go) вызовом
