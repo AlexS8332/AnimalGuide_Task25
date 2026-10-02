@@ -378,7 +378,8 @@ func modifierBefore(text string, toks []token, used []bool, i int) bool {
 // сам канон, Species.Aliases, латынь, заголовок документа, названия через
 // «или» из первого предложения вступления и пары «кот ↔ кошка» (AliasesOf).
 // Синоним, который у двух видов разный, выбрасывается: раскрывать его не во
-// что.
+// что; общие названия («дикая кошка», genericNames) — тоже. Из тех же
+// документов — пары семейств и родов «русское ↔ латынь» (taxa).
 func LoadAliases(ctx context.Context, st *kb.Store) (*Aliases, error) {
 	infos, err := st.Docs(ctx)
 	if err != nil {
@@ -402,7 +403,7 @@ func AliasesOf(docs []corpus.Doc) *Aliases {
 	bad := map[string]bool{}
 	put := func(name, canon string) {
 		k := corpus.Normalize(name)
-		if k == "" || bad[k] {
+		if k == "" || bad[k] || genericNames[k] {
 			return
 		}
 		if prev, ok := a.Canon[k]; ok && prev != canon {
@@ -442,6 +443,7 @@ func AliasesOf(docs []corpus.Doc) *Aliases {
 			a.Latin[canon] = sp.Latin
 		}
 	}
+	a.Families, a.Genera = taxa(docs)
 	return a
 }
 
