@@ -265,6 +265,21 @@ func (o *issued) add(hits []kb.Hit, gated bool, why string) {
 	}
 }
 
+// IDs — chunk_id выдачи хода по порядку выдачи (для итогов хода: kb_answer
+// следующих ходов ветки примет их, Hook.past).
+func (o *issued) IDs() []string {
+	if o == nil {
+		return nil
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	out := make([]string, 0, len(o.hits))
+	for _, h := range o.hits {
+		out = append(out, h.ID)
+	}
+	return out
+}
+
 // Hits — копия выдачи хода.
 func (o *issued) Hits() []kb.Hit {
 	if o == nil {

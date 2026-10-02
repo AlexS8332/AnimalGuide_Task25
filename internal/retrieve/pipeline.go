@@ -171,8 +171,14 @@ func (p *Pipeline) gather(ctx context.Context, q Query, c Config) (Trace, error)
 		t.QueriesBM25 = nil
 	}
 
-	// Якорь — виды, названные в самой реплике (не из контекста).
+	// Якорь — виды, названные в самой реплике (не из контекста), и при
+	// переписывании кодом — второй участник сравнения «он или манул»,
+	// названный местоимением (comparedSpecies): его вид ушёл в запрос, и
+	// рамка якоря иначе отсекла бы его статью.
 	t.Anchored = al.Species(t.Original)
+	if c.Rewrite == RewriteCode {
+		t.Anchored = append(t.Anchored, comparedSpecies(al, withTerms(q), t.Anchored)...)
+	}
 	if c.Scope && c.Filter {
 		if amb := al.Ambiguous(t.Original); len(amb) > 0 && len(t.Anchored) > 0 {
 			// «Чем питается рысь и сколько весит росомаха?»: «рысь» — вид,
@@ -275,15 +281,56 @@ func joinContext(q Query) string {
 //     «барс = ирбис» ищет ирбиса, хотя словарь «барс» не раскрывает:
 //     название неоднозначно); вид из цели — последняя ступень для
 //     продолжения: реплика и контекст вида не назвали, а цель («доклад о
-//     манулах и ирбисах») назвала. В запрос идут только канонические
-//     названия видов цели, а не вся цель: «доклад для школьников» тянул
-//     бы поиск к словам «доклад» и «школьники».
+//     мануле») назвала. Только один вид, названный однозначно и в
+//     единственном числе (goalSpecies): цель о группе («о диких кошках
+//     Азии», «о манулах и ирбисах») вида не даёт. В запрос идёт только
+//     каноническое название, а не вся цель: «доклад для школьников» тянул
+//     бы поиск к словам «доклад» и «школьники»;
+//   - сравнение «он или манул» (v25): в реплике назван вид, а второй
+//     участник — местоимение рядом с маркером сравнения; вид ближайшей
+//     реплики контекста идёт в запрос и в якорь (comparedSpecies);
+//   - таксоны выше вида (v25, taxonQuery): «по MDD» — полное название MDD и
+//     латынь семейства; «в роде куниц» — «род Martes».
 func rewriteCode(al *Aliases, q Query) (dense, bm25 string, expanded []string, note string) {
+	dense, bm25, expanded, note = rewriteSpecies(al, q)
+	td, tb, tl := taxonQuery(al, strings.TrimSpace(q.Text))
+	if len(td) > 0 {
+		dense += " " + strings.Join(td, " ")
+	}
+	if len(tb) > 0 {
+		bm25 += " " + strings.Join(tb, " ")
+	}
+	return dense, bm25, append(expanded, tl...), note
+}
+
+// withTerms — запрос с репликой, раскрытой терминами задачи («барс» →
+// «ирбис»): якорь сравнения считается по той же реплике, что и запрос.
+func withTerms(q Query) Query {
+	terms := task.State{Terms: q.Terms}
+	q.Text, _ = terms.Expand(strings.TrimSpace(q.Text))
+	return q
+}
+
+// rewriteSpecies — часть rewriteCode о видах (без таксонов выше вида).
+func rewriteSpecies(al *Aliases, q Query) (dense, bm25 string, expanded []string, note string) {
 	terms := task.State{Terms: q.Terms}
 	text, byTerms := terms.Expand(strings.TrimSpace(q.Text))
 	dense, bm25, expanded = al.Queries(text)
 	expanded = append(byTerms, expanded...)
-	if len(al.Species(text)) > 0 || !continuation(al, text) {
+	if named := al.Species(text); len(named) > 0 {
+		// «Кто из них крупнее — он или манул?»: второй участник сравнения —
+		// вид прошлой реплики.
+		if sp := comparedSpecies(al, Query{Text: text, Context: q.Context, Terms: q.Terms}, named); len(sp) > 0 {
+			d, b := strings.Join(sp, " "), strings.Join(sp, " ")
+			if lat := latinOf(al, sp); lat != "" {
+				b += " " + lat
+			}
+			expanded = append(expanded, "вид из контекста для сравнения → "+strings.Join(sp, ", "))
+			return dense + " " + d, bm25 + " " + b, expanded, ""
+		}
+		return dense, bm25, expanded, ""
+	}
+	if !continuation(al, text) {
 		return dense, bm25, expanded, ""
 	}
 	for i := len(q.Context) - 1; i >= 0; i-- {
@@ -297,16 +344,10 @@ func rewriteCode(al *Aliases, q Query) (dense, bm25 string, expanded []string, n
 		return pd + " " + dense, pb + " " + bm25, expanded, ""
 	}
 	if goal, _ := terms.Expand(strings.TrimSpace(q.Goal)); goal != "" {
-		if sp := al.Species(goal); len(sp) > 0 {
+		if sp := goalSpecies(al, goal); len(sp) > 0 {
 			gd, gb := strings.Join(sp, " "), strings.Join(sp, " ")
-			var lat []string
-			for _, s := range sp {
-				if l := al.Latin[s]; l != "" {
-					lat = append(lat, l)
-				}
-			}
-			if len(lat) > 0 {
-				gb += " " + strings.Join(lat, " ")
+			if lat := latinOf(al, sp); lat != "" {
+				gb += " " + lat
 			}
 			expanded = append(expanded, "вид из цели задачи → "+strings.Join(sp, ", "))
 			return gd + " " + dense, gb + " " + bm25, expanded, ""
@@ -317,6 +358,17 @@ func rewriteCode(al *Aliases, q Query) (dense, bm25 string, expanded []string, n
 	}
 	return joinContext(Query{Text: dense, Context: q.Context}), joinContext(Query{Text: bm25, Context: q.Context}), expanded,
 		"вид в контексте не назван — в поиск ушли контекст и вопрос"
+}
+
+// latinOf — латынь видов через пробел (пусто — латыни нет).
+func latinOf(al *Aliases, sp []string) string {
+	var lat []string
+	for _, s := range sp {
+		if l := al.Latin[s]; l != "" {
+			lat = append(lat, l)
+		}
+	}
+	return strings.Join(lat, " ")
 }
 
 // continuationWords — местоимения и указательные слова, по которым реплика

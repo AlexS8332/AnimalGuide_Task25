@@ -222,6 +222,11 @@ type Aliases struct {
 	// добавление v24). Пусто — рамка не применяется: словарь собран не из
 	// документов базы.
 	Docs map[string]string
+	// Families, Genera — таксоны выше вида (v25, taxa.go): основа русского
+	// названия семейства или рода → латынь («кун» → Mustelidae, «куниц» →
+	// Martes). Пусто — переписывание без них.
+	Families map[string]string
+	Genera   map[string]string
 
 	// Индекс сопоставления строится из Canon при первом вызове (aliases.go).
 	once sync.Once

@@ -12,13 +12,13 @@ import (
 
 // Память задачи (v25) в поиске: при механизме task хук передаёт термины и
 // цель ветки в переписывание запроса (rag.rewrite). Продолжение «а сколько
-// они весят?» без вида в реплике и в окне ищет виды из цели.
+// они весят?» без вида в реплике и в окне ищет вид из цели.
 func TestHookPassesTaskToRewrite(t *testing.T) {
 	h := &Hook{Searcher: searcher(t), K: 3}
 	search := func(spec string) SearchResult {
 		t.Helper()
 		tr, rec := hookTurn(t, spec, "А сколько они весят?")
-		tr.Task = task.State{Goal: "доклад о манулах", Terms: []task.Term{{Term: "наш зверь", Meaning: "манул"}}, Version: 2}
+		tr.Task = task.State{Goal: "доклад о мануле", Terms: []task.Term{{Term: "наш зверь", Meaning: "манул"}}, Version: 2}
 		if err := h.Before(context.Background(), tr); err != nil {
 			t.Fatal(err)
 		}

@@ -79,6 +79,12 @@ type Request struct {
 	// вместо «ход не удался» — ответ механизма (у rag.cite — «не знаю» с
 	// пометкой «не проверено»). nil — ошибка хода как раньше.
 	FinishFail func(err error) Texter `json:"-"`
+	// NoSources — ход ведущего без карточек и источников (Википедия, GBIF):
+	// только инструменты механизмов (Tools). Так идёт реплика о самом
+	// разговоре при rag.cite (v25): ответ — по памяти задачи и истории, а
+	// источники по виду из истории увели бы его в статью о животном. Ход с
+	// Finish получает то же без этого поля.
+	NoSources bool `json:"-"`
 }
 
 // Texter — результат завершающего инструмента, который сам знает свой
@@ -456,9 +462,10 @@ func briefCard(c card.Card, secs []card.Section) map[string]any {
 func (t *turn) lead(ctx context.Context, req Request) (agent.Reply, error) {
 	// Ход с завершающим инструментом (rag.cite) отвечает только по его
 	// инструментам: карточки и источники (Википедия, GBIF) ответ не
-	// подтвердят — kb_answer цитирует только выдачу kb_search.
+	// подтвердят — kb_answer цитирует только выдачу kb_search. Так же —
+	// ход, которому механизм запретил источники (NoSources).
 	var list []tools.Tool
-	if len(req.Finish) == 0 {
+	if len(req.Finish) == 0 && !req.NoSources {
 		src, err := sourcePick(t.reg, tools.SourceTools...)
 		if err != nil {
 			return agent.Reply{}, err
