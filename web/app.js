@@ -977,7 +977,7 @@ Object.assign(actions, {
 // текущей ветки диалога. GET → State, PUT State → State. Ответ в обёртке
 // {task: State} тоже принимается.
 const taskAPI = {
-  path: conv => `/api/conversations/${encodeURIComponent(conv)}/task`,
+  path: conv => `/api/task/${encodeURIComponent(conv)}`,
   async get(conv) { return taskUnwrap(await api('GET', taskAPI.path(conv))); },
   async put(conv, state) { return taskUnwrap(await api('PUT', taskAPI.path(conv), state)); },
 };

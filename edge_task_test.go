@@ -17,7 +17,7 @@ import (
 )
 
 // edgeTask — подставной REST памяти задачи (v25) по пути адаптера taskAPI
-// в web/app.js: GET /api/conversations/{id}/task → State, PUT State →
+// в web/app.js: GET /api/task/{id} → State (как internal/taskapi), PUT State →
 // State (версия +1). Хранит в памяти; незнакомый диалог — пустое
 // состояние. puts — тела PUT, чтобы сценарий сверил, что ушло на сервер.
 type edgeTask struct {
@@ -28,7 +28,7 @@ type edgeTask struct {
 
 func newEdgeTask() *edgeTask { return &edgeTask{states: map[string]task.State{}} }
 
-var edgeTaskPath = regexp.MustCompile(`^/api/conversations/([0-9a-f]+)/task$`)
+var edgeTaskPath = regexp.MustCompile(`^/api/task/([0-9a-f]+)$`)
 
 // serve отвечает на путь памяти задачи; иначе false — запрос уходит
 // приложению.

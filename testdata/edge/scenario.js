@@ -2249,12 +2249,12 @@
     await sleep(200);
   };
 
-  /* Память задачи (v25): подставной REST за /api/conversations/{id}/task
+  /* Память задачи (v25): подставной REST за /api/task/{id}
      (edgeTask в edge_task_test.go) хранит состояние в памяти; ход диалога
      несёт изменения задачи в extras.task (edgeTaskHook). */
   const taskList = key => q(`#panel-task .task-list[data-list="${key}"]`);
   const taskItems = key => [...(taskList(key) ? taskList(key).querySelectorAll('li .task-text') : [])].map(x => x.textContent);
-  const taskPuts = () => factsCalls.filter(x => x.method === 'PUT' && /\/api\/conversations\/[0-9a-f]+\/task$/.test(x.url));
+  const taskPuts = () => factsCalls.filter(x => x.method === 'PUT' && /\/api\/task\/[0-9a-f]+$/.test(x.url));
   const taskReady = () => until('панель задачи', () => q('#panel-task .task-goal') && !q('#task-form'), 8000);
   function taskForm(values) {
     const f = $('task-form');
@@ -2277,7 +2277,7 @@
       assert(taskItems('clarified').length === 0 && text('#panel-task .task-list[data-list="clarified"] .hint') === '—', 'уточнено не пусто');
       assert(qa('#panel-task .task-list h3').map(h => h.textContent).join(',') === 'Уточнено,Ограничения,Термины,Открыто', 'заголовки списков');
       assert(text('#panel-task .task-version') === 'v4', 'версия: ' + text('#panel-task .task-version'));
-      assert(factsCalls.some(x => x.method === 'GET' && x.url === `/api/conversations/${app.conv.id}/task`), 'не спросили taskAPI');
+      assert(factsCalls.some(x => x.method === 'GET' && x.url === `/api/task/${app.conv.id}`), 'не спросили taskAPI');
     });
 
     await check('задача: у пункта — номер хода и цитата в подсказке', () => {

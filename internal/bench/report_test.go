@@ -67,7 +67,7 @@ func TestRunAll(t *testing.T) {
 		t.Fatalf("прогон: %+v", out)
 	}
 	names := blockMechanisms(r.env.Registry)
-	if len(names) != 6 || names[0] != features.Charter {
+	if len(names) != 7 || names[0] != features.Charter {
 		t.Fatalf("механизмы с блоком: %v", names)
 	}
 }
