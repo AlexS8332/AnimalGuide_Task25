@@ -22,6 +22,7 @@ import (
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/memory"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/profile"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/runs"
+	"github.com/AlexS8332/AnimalGuide_Task25/internal/task"
 )
 
 // Name — имя хука: под ним лежат итоги в ходе и сведения в диалоге.
@@ -168,8 +169,11 @@ func (h *Hook) extract(ctx context.Context, t *runs.Turn, st *state, id, title, 
 			Long:    fs.On(features.MemoryLong) && id != "",
 			Work:    fs.On(features.MemoryWork) && collection != "",
 			Facts:   fs.On(features.Facts),
+			// Память задачи (v25) — тем же запросом: раздел промпта и
+			// секция ответа, а не свой вызов модели.
+			Task: fs.On(features.Task),
 		},
-		Profile: st.prof, Long: st.long, Work: st.work, Facts: t.Facts,
+		Profile: st.prof, Long: st.long, Work: st.work, Facts: t.Facts, Task: t.Task,
 		History: t.History, User: t.Request.Text, Turn: t.Number, Reserved: Reserved,
 	}
 	upd, err := h.Extractor.Run(ctx, in)
@@ -224,6 +228,11 @@ func (h *Hook) extract(ctx context.Context, t *runs.Turn, st *state, id, title, 
 	if in.Targets.Facts {
 		t.Facts = upd.Facts
 	}
+	if in.Targets.Task {
+		// Ход пишет задачу в ветку при записи (runs.record); блок задачи
+		// ставит менеджер после хуков — уже с этой правкой.
+		t.Task = upd.Task
+	}
 
 	title2 := "извлекатель: " + upd.MemoryChanges.Summary()
 	if !upd.Changed() {
@@ -244,6 +253,14 @@ func (h *Hook) extract(ctx context.Context, t *runs.Turn, st *state, id, title, 
 	if len(upd.FactChanges) > 0 {
 		t.Extra("facts", upd.FactChanges)
 	}
+	// Чипы задачи — под именем механизма (Extras["task"]) в том же виде,
+	// что у facts: список правок, включая отклонённые с причиной (человек
+	// видит, что «цель» из ответа справочника не прошла).
+	if len(upd.TaskChanges) > 0 {
+		t.Extra(string(features.Task), upd.TaskChanges)
+		t.Em.Log(agent.Event{Agent: "extract", Kind: agent.EventMechanism, Mechanism: string(features.Task),
+			Title: "задача разговора: " + task.Summary(upd.TaskChanges), Detail: upd.Task.Render(), Data: upd.TaskChanges})
+	}
 }
 
 func detail(u extract.Update) string {
@@ -260,6 +277,13 @@ func detail(u extract.Update) string {
 	}
 	for _, c := range u.FactChanges {
 		fmt.Fprintf(&b, "факты: %s «%s» = %q %s\n", c.Op, c.Key, c.Value, c.Reason)
+	}
+	for _, c := range u.TaskChanges {
+		b.WriteString("задача: " + c.String())
+		if c.Quote != "" {
+			b.WriteString(" (цитата: «" + c.Quote + "»)")
+		}
+		b.WriteByte('\n')
 	}
 	return b.String()
 }

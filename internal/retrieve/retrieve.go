@@ -23,6 +23,7 @@ import (
 
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/kb"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/llm"
+	"github.com/AlexS8332/AnimalGuide_Task25/internal/task"
 )
 
 // ErrNotImplemented — заглушка контракта (оставлена для совместимости:
@@ -181,9 +182,18 @@ type Trace struct {
 
 // Query — что ищем. Context — предыдущие реплики человека (для
 // вопросов-продолжений).
+//
+// Terms и Goal — память задачи разговора (v25, механизм task); читает их
+// только RewriteCode. Термины раскрываются в запросе и в контексте («барс»
+// → ирбис, «наш зверь» → манул), а вид из цели («доклад о манулах и
+// ирбисах») получает вопрос-продолжение, если вида нет ни в реплике, ни в
+// контексте. Пакет task — лист: retrieve не тянет за собой ни runs, ни
+// history.
 type Query struct {
 	Text    string
 	Context []string
+	Terms   []task.Term
+	Goal    string
 }
 
 // Pipeline — конвейер над базой знаний.

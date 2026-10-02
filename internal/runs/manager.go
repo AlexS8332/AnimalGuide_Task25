@@ -17,6 +17,7 @@ import (
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/history"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/llm"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/paths"
+	"github.com/AlexS8332/AnimalGuide_Task25/internal/task"
 )
 
 // maxTurnsInMemory — сколько завершённых ходов держим для потока событий:
@@ -52,8 +53,12 @@ type Turn struct {
 	Request  agents.Request
 	Features features.Set
 	Facts    facts.State
-	Owners   []string
-	Em       agent.Emitter
+	// Task — память задачи ветки (v25): снимок на старте хода; извлекатель
+	// (persona) правит его, rag берёт термины и цель для поиска, record
+	// пишет обратно в ветку.
+	Task   task.State
+	Owners []string
+	Em     agent.Emitter
 	// Handler — если хук взял ход на себя (подборка), он и отвечает.
 	Handler func(ctx context.Context) (agents.Result, error)
 	Result  *agents.Result
@@ -276,7 +281,7 @@ func (m *Manager) sendLocked(c *history.Conversation, req agents.Request) (*Sess
 
 	t := &Turn{ID: s.view.ID, Number: len(c.PathTurns(c.Active)) + 1, Conv: c.Clone(), Branch: c.Active,
 		History: c.Path(c.Active), Request: req, Features: c.Features, Facts: c.Facts().Clone(),
-		Owners: append([]string(nil), c.Owners...), Em: s}
+		Task: c.Task().Clone(), Owners: append([]string(nil), c.Owners...), Em: s}
 	go m.run(s, t)
 	return s, nil
 }
@@ -293,6 +298,7 @@ func (m *Manager) run(s *Session, t *Turn) {
 				Title: h.Name() + ": не сработал до хода — " + err.Error(), Detail: "Ход идёт с тем, что есть."})
 		}
 	}
+	m.taskBlock(t)
 	t.Request.Blocks = m.cfg.Registry.Order(t.Request.Blocks, t.Features)
 
 	var res agents.Result
@@ -343,6 +349,22 @@ func (m *Manager) prepare(t *Turn) {
 	}
 }
 
+// taskBlock — блок памяти задачи (механизм task). Ставится после хуков, а
+// не в prepare, как карточка фактов: извлекатель (persona.Before) уже
+// применил правку этого хода, и «и без латыни» действует в этом же ответе,
+// а не со следующего. Выключен механизм или задача пуста — блока нет,
+// механизм стоит ноль. Блок попадает и ведущему, и составителю подборки
+// (тот берёт Request.Blocks целиком); специалисты получают только свод и
+// профиль (agents.headBlocks).
+func (m *Manager) taskBlock(t *Turn) {
+	if !t.Features.On(features.Task) {
+		return
+	}
+	if text := t.Task.Block(); text != "" {
+		t.AddBlock(features.Block{Feature: features.Task, Title: "задача разговора", Text: text})
+	}
+}
+
 // record — ход в историю. Неудачный ход записывается без сообщений: история
 // хранит только завершённые (ФТ-15).
 func (m *Manager) record(s *Session, t *Turn) {
@@ -375,6 +397,12 @@ func (m *Manager) record(s *Session, t *Turn) {
 		if err := c.Append(t.Branch, turn, added, t.Facts, t.Meter); err != nil {
 			saveErr = err
 		} else {
+			// Задача ветки — как карточка фактов: снимок с версией не старше
+			// записанного (ручная правка на панели во время хода невозможна —
+			// edit отвечает ErrBusy, — но правило то же).
+			if t.Err == nil && t.Task.Version > 0 {
+				c.SetTask(t.Branch, t.Task)
+			}
 			saveErr = m.cfg.Store.Save(c)
 		}
 	}
@@ -430,6 +458,24 @@ func (m *Manager) edit(id string, fn func(c *history.Conversation) error) (Detai
 		return Detail{}, err
 	}
 	return m.detailLocked(c), nil
+}
+
+// EditTask — ручная правка памяти задачи текущей ветки (панель «Задача»):
+// fn получает копию состояния, результат чистится (task.Clean: пределы,
+// повторы) и записывается с версией на единицу больше прежней. Во время
+// хода нельзя (ErrBusy): ход перезаписал бы правку своим снимком.
+func (m *Manager) EditTask(id string, fn func(s *task.State) error) (Detail, error) {
+	return m.edit(id, func(c *history.Conversation) error {
+		cur := c.Task()
+		next := cur.Clone()
+		if err := fn(&next); err != nil {
+			return err
+		}
+		next = next.Clean()
+		next.Version = cur.Version + 1
+		_, err := c.SetTask(c.Active, next)
+		return err
+	})
 }
 
 // Mark — точка сохранения на конце текущей ветки.

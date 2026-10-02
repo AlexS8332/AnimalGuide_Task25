@@ -138,17 +138,19 @@ func searchTool(s *kb.Searcher, index string, k int, obs *issued) tools.Tool {
 // теме. Ответ — кратко: переписанный запрос (если переписан), сколько
 // отсечено фильтром и заметка; полный путь поиска — в окне «База знаний».
 func PipelineTool(p *retrieve.Pipeline, c retrieve.Config, history []string, k int) tools.Tool {
-	return pipelineTool(p, c, history, k, nil)
+	return pipelineTool(p, c, retrieve.Query{Context: history}, k, nil)
 }
 
 // pipelineTool — PipelineTool с наблюдателем выдачи (rag.cite): выдача
 // каждого вызова и решение Gate по его трассе копятся в obs, отсечённый
-// вызов получает пометку для модели.
-func pipelineTool(p *retrieve.Pipeline, c retrieve.Config, history []string, k int, obs *issued) tools.Tool {
+// вызов получает пометку для модели. base — всё, кроме текста запроса:
+// прошлые реплики и память задачи (v25: термины и цель ветки, их читает
+// только RewriteCode); Text каждого вызова — query модели или кода.
+func pipelineTool(p *retrieve.Pipeline, c retrieve.Config, base retrieve.Query, k int, obs *issued) tools.Tool {
 	k = orK(k)
 	c.Index = orIndex(c.Index)
 	if c.Rewrite == retrieve.RewriteNone {
-		history = nil
+		base = retrieve.Query{}
 	}
 	return tools.Func{
 		S: tools.Spec{Name: ToolName, Description: searchDescription, Parameters: json.RawMessage(searchSchema),
@@ -173,7 +175,7 @@ func pipelineTool(p *retrieve.Pipeline, c retrieve.Config, history []string, k i
 			if in.K > 0 {
 				cc.K1 = orK(in.K)
 			}
-			t, err := p.Search(ctx, retrieve.Query{Text: in.Query, Context: history}, cc)
+			t, err := p.Search(ctx, retrieve.Query{Text: in.Query, Context: base.Context, Terms: base.Terms, Goal: base.Goal}, cc)
 			if err != nil {
 				return "", fmt.Errorf("поиск по базе знаний: %w", err)
 			}

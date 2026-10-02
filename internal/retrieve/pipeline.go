@@ -12,6 +12,7 @@ import (
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/corpus"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/kb"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/llm"
+	"github.com/AlexS8332/AnimalGuide_Task25/internal/task"
 )
 
 // DefaultIndex — индекс конвейера по умолчанию (rag.DefaultIndex; rag
@@ -268,15 +269,25 @@ func joinContext(q Query) string {
 //     контекст и вопрос (с заметкой);
 //   - реплика с названным видом или самостоятельная («Сколько весит
 //     взрослый жираф?») — без контекста: прошлые реплики тянули бы поиск к
-//     прошлой теме.
+//     прошлой теме;
+//   - память задачи (v25): термины человека раскрываются до всего
+//     остального — и в реплике, и в контексте («где живёт барс?» при
+//     «барс = ирбис» ищет ирбиса, хотя словарь «барс» не раскрывает:
+//     название неоднозначно); вид из цели — последняя ступень для
+//     продолжения: реплика и контекст вида не назвали, а цель («доклад о
+//     манулах и ирбисах») назвала. В запрос идут только канонические
+//     названия видов цели, а не вся цель: «доклад для школьников» тянул
+//     бы поиск к словам «доклад» и «школьники».
 func rewriteCode(al *Aliases, q Query) (dense, bm25 string, expanded []string, note string) {
-	text := strings.TrimSpace(q.Text)
+	terms := task.State{Terms: q.Terms}
+	text, byTerms := terms.Expand(strings.TrimSpace(q.Text))
 	dense, bm25, expanded = al.Queries(text)
-	if len(q.Context) == 0 || len(al.Species(text)) > 0 || !continuation(al, text) {
+	expanded = append(byTerms, expanded...)
+	if len(al.Species(text)) > 0 || !continuation(al, text) {
 		return dense, bm25, expanded, ""
 	}
 	for i := len(q.Context) - 1; i >= 0; i-- {
-		prev := strings.TrimSpace(q.Context[i])
+		prev, _ := terms.Expand(strings.TrimSpace(q.Context[i]))
 		sp := al.Species(prev)
 		if len(sp) == 0 {
 			continue
@@ -284,6 +295,25 @@ func rewriteCode(al *Aliases, q Query) (dense, bm25 string, expanded []string, n
 		pd, pb, pl := al.Queries(prev)
 		expanded = append(append(pl, expanded...), "вид из контекста → "+strings.Join(sp, ", "))
 		return pd + " " + dense, pb + " " + bm25, expanded, ""
+	}
+	if goal, _ := terms.Expand(strings.TrimSpace(q.Goal)); goal != "" {
+		if sp := al.Species(goal); len(sp) > 0 {
+			gd, gb := strings.Join(sp, " "), strings.Join(sp, " ")
+			var lat []string
+			for _, s := range sp {
+				if l := al.Latin[s]; l != "" {
+					lat = append(lat, l)
+				}
+			}
+			if len(lat) > 0 {
+				gb += " " + strings.Join(lat, " ")
+			}
+			expanded = append(expanded, "вид из цели задачи → "+strings.Join(sp, ", "))
+			return gd + " " + dense, gb + " " + bm25, expanded, ""
+		}
+	}
+	if len(q.Context) == 0 {
+		return dense, bm25, expanded, ""
 	}
 	return joinContext(Query{Text: dense, Context: q.Context}), joinContext(Query{Text: bm25, Context: q.Context}), expanded,
 		"вид в контексте не назван — в поиск ушли контекст и вопрос"
