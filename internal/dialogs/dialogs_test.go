@@ -3,6 +3,7 @@ package dialogs
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -272,5 +273,132 @@ func TestFromTurn(t *testing.T) {
 	}
 	if o := FromTurn(history.Turn{Status: history.TurnDone, Reply: "Карточка."}); o.Status() != "none" {
 		t.Fatalf("без rag.cite: %+v", o)
+	}
+}
+
+// «Без латыни» ловит и одиночное слово латиницей от четырёх букв (род,
+// семейство); коды МСОП, «MDD» и аббревиатуры заглавными — не латынь.
+func TestNoLatinSingleWords(t *testing.T) {
+	for _, s := range []string{"Харза из рода Martes.", "Семейство Mustelidae велико.", "Подсемейство Mustelinae.", "Малая панда (Ailurus) — пандовые."} {
+		if LatinFound(s) == "" {
+			t.Errorf("%q: латынь не найдена", s)
+		}
+	}
+	for _, s := range []string{"Статус LC, у панды — EN; CR, VU, NT, EW, EX, DD, NE.", "По MDD v2.5 — 72 вида.", "По данным IUCN и GBIF.", "Манул живёт в Азии."} {
+		if m := LatinFound(s); m != "" {
+			t.Errorf("%q: ложная латынь %q", s, m)
+		}
+	}
+	s := scenario()
+	if c := byName(CheckTurn(s, 1, answered("Это род Felis.", "manul/structure/001"))); c[RuleNoLatin].OK || c[RuleNoLatin].Got != "Felis" {
+		t.Fatalf("род латиницей: %+v", c[RuleNoLatin])
+	}
+}
+
+// must — числа и слова ответа; grounded — опора на цитаты у answered
+// (признак проверки rag.cite, без него — NumbersMissing и
+// SpeciesMismatch пусты).
+func TestMustAndGrounded(t *testing.T) {
+	if m := MustMissing("Соболь весит 0.8–1,4 кг, харза — до 5,8.", []string{"0,8", "1,4", "соб"}); len(m) != 0 {
+		t.Fatalf("must: %v", m)
+	}
+	if m := MustMissing("Около 58 тысяч, 12 кг.", []string{"8", "12", "манул"}); len(m) != 2 || m[0] != "8" || m[1] != "манул" {
+		t.Fatalf("8 в 58 и слово: %v", m)
+	}
+	s := scenario()
+	s.Turns[1].Must = []string{"0,8", "1,4"}
+	o := answered("Харза тяжелее: соболь весит 0,8–1,4 кг.", "yellow-throated-marten/structure/003", "sable/structure/007")
+	c := byName(CheckTurn(s, 2, o))
+	if !c[CheckMust].OK || !c[CheckGrounded].OK {
+		t.Fatalf("хороший ответ: %+v", c)
+	}
+	o = answered("Харза тяжелее соболя.", "yellow-throated-marten/structure/003", "sable/structure/007")
+	o.Cite.Check.NumbersMissing = []string{"13"}
+	c = byName(CheckTurn(s, 2, o))
+	if c[CheckMust].OK || c[CheckMust].Got != "нет: 0,8, 1,4" || c[CheckGrounded].OK || !strings.Contains(c[CheckGrounded].Got, "13") {
+		t.Fatalf("без чисел и с числом вне цитат: %+v", c)
+	}
+	// Отчётные: провалом хода не делают.
+	if f := (TurnReport{Checks: CheckTurn(s, 2, o)}).Failed(); len(f) != 0 {
+		t.Fatalf("отчётные проверки провалили ход: %+v", f)
+	}
+	// Признак проверки rag.cite важнее косвенных.
+	yes := true
+	o.Grounded = &yes
+	if c := byName(CheckTurn(s, 2, o)); !c[CheckGrounded].OK {
+		t.Fatalf("grounded из проверки: %+v", c[CheckGrounded])
+	}
+	// У «не знаю» и о разговоре — не определить; must у них запрещён.
+	unk := Observed{Reply: "Не знаю.", Cite: &rag.CiteView{Cited: rag.Cited{Status: rag.StatusUnknown}}}
+	if c := byName(CheckTurn(s, 4, unk)); !c[CheckGrounded].NA {
+		t.Fatalf("grounded у «не знаю»: %+v", c[CheckGrounded])
+	}
+	bad := s
+	bad.Turns = append([]Turn(nil), s.Turns...)
+	bad.Turns[3].Must = []string{"1"}
+	if err := Validate(bad, nil); err == nil || !strings.Contains(err.Error(), "must — только у вопроса по базе") {
+		t.Fatalf("must у вопроса вне базы: %v", err)
+	}
+	// Grounded из записи хода — поле check.grounded итога rag.cite.
+	tr := history.Turn{ID: "t1", Status: history.TurnDone, Reply: "Ответ."}
+	tr.SetExtra(string(features.RAGCite), map[string]any{"cited": map[string]any{"status": "answered", "answer": "Ответ."},
+		"check": map[string]any{"ok": true, "has_sources": true, "grounded": false}})
+	if o := FromTurn(tr); o.Grounded == nil || *o.Grounded {
+		t.Fatalf("grounded из хода: %+v", o.Grounded)
+	}
+}
+
+// Источники показаны (ТЗ): ответ по базе — со списком; «не знаю» — даже с
+// пустой выдачей; о разговоре — память задачи; ход мимо rag.cite — нет.
+func TestSourcesShown(t *testing.T) {
+	cases := []struct {
+		o    Observed
+		want bool
+	}{
+		{answered("Манул живёт в Азии.", "manul/structure/001"), true},
+		{answered("Манул живёт в Азии."), false},
+		{Observed{Reply: "Не знаю.", Cite: &rag.CiteView{Cited: rag.Cited{Status: rag.StatusUnknown}}}, true},
+		{Observed{Reply: "Цель — доклад.", Cite: &rag.CiteView{Meta: true, MetaSource: rag.MetaSource}}, true},
+		{Observed{Reply: "Карточка."}, false},
+		{Observed{Error: "упал"}, false},
+	}
+	for i, c := range cases {
+		if got, why := SourcesShown(c.o); got != c.want {
+			t.Errorf("%d: %v (%s), ждали %v", i, got, why, c.want)
+		}
+	}
+}
+
+// must сценариев сверен с корпусом: каждое число и слово есть в тексте
+// одного из ожидаемых документов; у B — марка перезапуска.
+func TestScenarioMustInCorpus(t *testing.T) {
+	restart := false
+	for _, name := range []string{"a.json", "b.json"} {
+		s, err := Load(filepath.Join("..", "..", "eval", "dialogs", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, tr := range s.Turns {
+			restart = restart || tr.Has(MarkRestart)
+			if len(tr.Must) == 0 {
+				continue
+			}
+			var text strings.Builder
+			for _, d := range tr.Docs {
+				for _, alt := range strings.Split(d, "|") {
+					data, err := os.ReadFile(filepath.Join("..", "..", "corpus", strings.TrimSpace(alt)+".json"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					text.Write(data)
+				}
+			}
+			if m := MustMissing(text.String(), tr.Must); len(m) > 0 {
+				t.Errorf("%s·%d: в корпусе нет %v", s.ID, i+1, m)
+			}
+		}
+	}
+	if !restart {
+		t.Error("ни в одном сценарии нет марки restart")
 	}
 }
