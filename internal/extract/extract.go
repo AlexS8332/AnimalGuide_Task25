@@ -5,10 +5,13 @@
 //	профиль         — как разговаривать с этим человеком (манера);
 //	долговременная  — что известно о человеке вообще, между разговорами;
 //	рабочая         — что собрано по текущей подборке;
-//	карточка фактов — что сказано и решено в этой ветке разговора.
+//	карточка фактов — что сказано и решено в этой ветке разговора;
+//	задача (v25)    — зачем человеку этот разговор: цель, уточнения,
+//	                  ограничения, термины, открытые вопросы.
 //
 // Главное в промпте — граница между ними (П-6). Запрос один: по запросу на
-// адресата сломал бы бюджет в четыре запроса на ход.
+// адресата сломал бы бюджет в четыре запроса на ход; задача добавила
+// раздел в тот же ответ, а не свой запрос.
 //
 // Извлекатель читает только реплики пользователя и ответы модели, но не
 // содержимое источников (ФТ-42): ничто из текста статьи не может стать
@@ -28,6 +31,7 @@ import (
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/llm"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/memory"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/profile"
+	"github.com/AlexS8332/AnimalGuide_Task25/internal/task"
 )
 
 // recentMessages — сколько последних сообщений показать вместе с репликой:
@@ -43,10 +47,12 @@ type Targets struct {
 	Long    bool
 	Work    bool
 	Facts   bool
+	// Task — память задачи ветки (механизм task).
+	Task bool
 }
 
 // Any — есть ли куда писать вообще.
-func (t Targets) Any() bool { return t.Profile || t.Long || t.Work || t.Facts }
+func (t Targets) Any() bool { return t.Profile || t.Long || t.Work || t.Facts || t.Task }
 
 // Input — с чем извлекатель входит в ход.
 type Input struct {
@@ -55,6 +61,7 @@ type Input struct {
 	Long    memory.Card
 	Work    memory.Card
 	Facts   facts.State
+	Task    task.State
 	// History — путь ветки до реплики; содержимое инструментов из него
 	// выбрасывается.
 	History []llm.Message
@@ -70,6 +77,8 @@ type Reply struct {
 	Memory  memory.Patch  `json:"memory"`
 	Profile profile.Patch `json:"profile"`
 	Facts   FactsPatch    `json:"facts"`
+	// Task — правка памяти задачи; цитаты сверяет task.Apply.
+	Task task.Patch `json:"task"`
 }
 
 // FactsPatch — правки карточки фактов.
@@ -98,6 +107,8 @@ type Update struct {
 	MemoryChanges  memory.Changes  `json:"memory,omitempty"`
 	Facts          facts.State     `json:"-"`
 	FactChanges    []FactChange    `json:"facts,omitempty"`
+	Task           task.State      `json:"-"`
+	TaskChanges    []task.Change   `json:"task,omitempty"`
 	Called         bool            `json:"called"`
 	Usage          llm.Usage       `json:"usage"`
 	Cost           llm.Cost        `json:"cost"`
@@ -116,7 +127,7 @@ type Extractor struct {
 // Input; записать их — дело вызывающего. Ошибка — не ошибка хода: ход идёт
 // с прежними памятью и профилем.
 func (e Extractor) Run(ctx context.Context, in Input) (Update, error) {
-	upd := Update{Profile: in.Profile.Clone(), Long: in.Long.Clone(), Work: in.Work.Clone(), Facts: in.Facts.Clone()}
+	upd := Update{Profile: in.Profile.Clone(), Long: in.Long.Clone(), Work: in.Work.Clone(), Facts: in.Facts.Clone(), Task: in.Task.Clone()}
 	if !in.Targets.Any() {
 		return upd, nil
 	}
@@ -199,11 +210,17 @@ func (u *Update) apply(in Input, r Reply) {
 			}
 		}
 	}
+	// Задача — только словами человека: цитата каждой правки сверяется с
+	// репликой этого хода (task.Apply), ответ справочника её не меняет.
+	if in.Targets.Task {
+		u.TaskChanges = u.Task.Apply(r.Task, in.User, in.Turn)
+	}
 }
 
 // Changed — изменилось ли хоть что-нибудь.
 func (u Update) Changed() bool {
-	return len(u.ProfileChanges.Applied()) > 0 || len(u.MemoryChanges.Applied()) > 0 || len(u.FactChanges) > 0
+	return len(u.ProfileChanges.Applied()) > 0 || len(u.MemoryChanges.Applied()) > 0 || len(u.FactChanges) > 0 ||
+		len(task.Applied(u.TaskChanges)) > 0
 }
 
 // ParseReply разбирает ответ: берётся самый внешний объект — модель то и
