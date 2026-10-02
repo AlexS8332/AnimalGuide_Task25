@@ -8,6 +8,7 @@ import (
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/facts"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/features"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/history"
+	"github.com/AlexS8332/AnimalGuide_Task25/internal/task"
 )
 
 // Summary — диалог для списка.
@@ -54,8 +55,10 @@ type Detail struct {
 	Runes       int                  `json:"runes"`
 	Cards       card.State           `json:"cards"`
 	Facts       facts.State          `json:"facts"`
-	Mechanisms  []features.Status    `json:"mechanisms"`
-	Active      *View                `json:"active,omitempty"`
+	// Task — память задачи текущей ветки (v25) для панели «Задача».
+	Task       task.State        `json:"task"`
+	Mechanisms []features.Status `json:"mechanisms"`
+	Active     *View             `json:"active,omitempty"`
 	// Extras — сведения механизмов о диалоге (профиль, память, подборка,
 	// свод): их добавляют хуки через Describer.
 	Extras map[string]any `json:"extras,omitempty"`
@@ -78,7 +81,7 @@ func (m *Manager) summaryLocked(c *history.Conversation) Summary {
 func (m *Manager) detailLocked(c *history.Conversation) Detail {
 	cl := c.Clone()
 	d := Detail{Summary: m.summaryLocked(c), Branch: cl.Active, Checkpoints: cl.Checkpoints,
-		TurnList: cl.Turns(), Cards: cl.Cards(cl.Active), Facts: cl.Facts(),
+		TurnList: cl.Turns(), Cards: cl.Cards(cl.Active), Facts: cl.Facts(), Task: cl.Task(),
 		Mechanisms: m.cfg.Registry.Describe(cl.Features)}
 	msgs := cl.Messages()
 	d.Messages, d.Runes = len(msgs), history.Runes(msgs)

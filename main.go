@@ -28,6 +28,7 @@ import (
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/llm"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/persona"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/server"
+	"github.com/AlexS8332/AnimalGuide_Task25/internal/taskapi"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/tokens"
 )
 
@@ -185,6 +186,7 @@ func main() {
 	exts = append(exts, a.Pipes.Extension()...)
 	exts = append(exts, a.Hub.Extension()...)
 	exts = append(exts, a.KB.Extension()...)
+	exts = append(exts, taskapi.Extension(manager)...)
 	handler := server.New(manager, static, meta, exts...)
 
 	listener, err := net.Listen("tcp", o.addr)

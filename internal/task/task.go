@@ -570,6 +570,90 @@ func covered(of, in []string) int {
 	return n
 }
 
+// Ручные правки (панель «Задача»): op для Manual.
+const (
+	ManualSetGoal = "set_goal"
+	ManualAdd     = "add"
+	ManualRemove  = "remove"
+	ManualClear   = "clear"
+)
+
+// Manual — правка руками: цитата не нужна, правит сам человек (ФТ-18:
+// раскладку предлагает извлекатель, правит человек). Пределы и повторы
+// наводит Clean у вызывающего; версию ставит тот, кто записывает.
+func (s *State) Manual(op string, it PatchItem) error {
+	list := strings.ToLower(strings.TrimSpace(it.List))
+	text := clean(it.Text)
+	switch op {
+	case ManualClear:
+		*s = State{Version: s.Version}
+		return nil
+	case ManualSetGoal:
+		if text == "" {
+			return errors.New("пустая цель: чтобы снять цель — remove со списком goal")
+		}
+		s.Goal, s.GoalQuote, s.GoalTurn = clip(text, MaxGoal), "", 0
+		return nil
+	case ManualAdd:
+		if list == ListTerms {
+			term, meaning := clean(it.Term), clean(it.Meaning)
+			if term == "" || meaning == "" {
+				if a, b, ok := splitTerm(it.Text); ok {
+					term, meaning = a, b
+				}
+			}
+			if term == "" || meaning == "" {
+				return errors.New("термину нужны term и meaning")
+			}
+			for i, t := range s.Terms {
+				if same(t.Term, term) {
+					s.Terms[i].Meaning = meaning
+					return nil
+				}
+			}
+			s.Terms = append(s.Terms, Term{Term: term, Meaning: meaning})
+			return nil
+		}
+		ptr := s.list(list)
+		if ptr == nil {
+			return fmt.Errorf("неизвестный список %q; допустимы clarified, constraints, terms, open", it.List)
+		}
+		if text == "" {
+			return errors.New("пустой пункт")
+		}
+		*ptr = append(*ptr, Item{Text: text})
+		return nil
+	case ManualRemove:
+		if list == ListGoal {
+			s.Goal, s.GoalQuote, s.GoalTurn = "", "", 0
+			return nil
+		}
+		if list == ListTerms {
+			key := text
+			if clean(it.Term) != "" {
+				key = clean(it.Term)
+			}
+			i := s.findTerm(key)
+			if i < 0 {
+				return fmt.Errorf("термина %q в задаче нет", key)
+			}
+			s.Terms = append(s.Terms[:i:i], s.Terms[i+1:]...)
+			return nil
+		}
+		ptr := s.list(list)
+		if ptr == nil {
+			return fmt.Errorf("неизвестный список %q; допустимы goal, clarified, constraints, terms, open", it.List)
+		}
+		i := findItem(*ptr, text)
+		if i < 0 {
+			return fmt.Errorf("пункта %q в задаче нет", text)
+		}
+		*ptr = append((*ptr)[:i:i], (*ptr)[i+1:]...)
+		return nil
+	}
+	return fmt.Errorf("неизвестное действие %q; допустимы set_goal, add, remove, clear", op)
+}
+
 // Clean — состояние после ручной правки (панель «Задача»): пробелы, пределы
 // длины и числа пунктов, пустые и повторы выкинуты. Версию не трогает —
 // её ставит тот, кто записывает.
