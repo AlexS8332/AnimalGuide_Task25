@@ -121,7 +121,7 @@ func wire(o options, registry *features.Registry, defaults features.Set, runner 
 		Agents:   deps,
 		Store:    history.NewStore(data),
 		Registry: registry, Defaults: defaults, Timeout: turnTimeout,
-		Window: o.window, KeepToolRunes: o.keep,
+		Window: o.window, KeepToolRunes: o.keep, CiteWindow: o.citeWindow(),
 		// Составитель первым: его ход видит блоки свода, профиля и памяти.
 		// Страж свода — раньше человека: соблюдение профиля проверяется по
 		// тому ответу, который дойдёт до человека.
@@ -139,6 +139,15 @@ func wire(o options, registry *features.Registry, defaults features.Set, runner 
 		Pipes: &feed.Pipelines{Remote: trivia.Remote, LLM: runner.LLM, Model: runner.Model},
 		Hub:   servers.api, KB: know.api,
 		Close: func() { client.Close(); launcher.Close(); trivia.Remote.Close(); servers.close(); know.close() }}, nil
+}
+
+// citeWindow — окно справочной по базе (rag.cite): -window, если задан
+// явно, иначе 0 — умолчание менеджера (history.CiteWindow).
+func (o options) citeWindow() int {
+	if o.windowSet {
+		return o.window
+	}
+	return 0
 }
 
 // hubParts — реестр серверов и его REST.

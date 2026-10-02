@@ -90,7 +90,11 @@ type Config struct {
 	// до скольких символов сокращать ответы инструментов прошлых ходов.
 	Window        int
 	KeepToolRunes int
-	Hooks         []Hook
+	// CiteWindow — окно диалога с механизмом rag.cite (справочная по базе):
+	// 0 — history.CiteWindow. Сборка ставит сюда -window, если человек
+	// задал его сам: своё окно важнее умолчания режима.
+	CiteWindow int
+	Hooks      []Hook
 }
 
 // Manager хранит диалоги, запускает ходы и записывает историю.
@@ -115,6 +119,9 @@ func NewManager(cfg Config) *Manager {
 	}
 	if cfg.KeepToolRunes == 0 {
 		cfg.KeepToolRunes = history.DefaultKeepToolRunes
+	}
+	if cfg.CiteWindow == 0 {
+		cfg.CiteWindow = history.CiteWindow
 	}
 	return &Manager{cfg: cfg, convs: map[string]*history.Conversation{}, active: map[string]*Session{},
 		turns: map[string]*Session{}, groups: map[string][]string{}}
@@ -252,7 +259,7 @@ func (m *Manager) sendLocked(c *history.Conversation, req agents.Request) (*Sess
 		return nil, ErrEmpty
 	}
 	if req.Kind == agents.KindMessage {
-		if kind, a, b := agents.Classify(req.Text, c.Cards(c.Active)); kind == agents.KindCompare {
+		if kind, a, b := agents.Route(req.Text, c.Cards(c.Active), c.Features); kind == agents.KindCompare {
 			req.Kind, req.A, req.B = kind, a, b
 		}
 	}
@@ -326,7 +333,7 @@ func (m *Manager) prepare(t *Turn) {
 	}
 	dropped := 0
 	if fs.On(features.Window) {
-		w := history.Window(window, m.cfg.Window)
+		w := history.Window(window, m.windowFor(fs))
 		dropped = len(window) - len(w)
 		window = w
 	}
@@ -341,6 +348,15 @@ func (m *Manager) prepare(t *Turn) {
 	if fs.On(features.Facts) && !t.Facts.Empty() {
 		t.AddBlock(features.Block{Feature: features.Facts, Title: "карточка фактов", Text: t.Facts.Prompt()})
 	}
+}
+
+// windowFor — окно хода по механизмам диалога: у справочной по базе
+// (rag.cite) своё, длиннее — её ходы занимают в истории больше сообщений.
+func (m *Manager) windowFor(fs features.Set) int {
+	if fs.On(features.RAGCite) {
+		return m.cfg.CiteWindow
+	}
+	return m.cfg.Window
 }
 
 // record — ход в историю. Неудачный ход записывается без сообщений: история

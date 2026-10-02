@@ -167,6 +167,12 @@ func TestBranchesFeaturesAndDelete(t *testing.T) {
 	if d["features"].(map[string]any)["guard"] != false {
 		t.Fatalf("механизмы нового диалога: %v", d["features"])
 	}
+	// Пресет «Справочная (RAG)» и правка поверх него.
+	code, rag := a.do(t, http.MethodPost, "/api/conversations", `{"empty":true,"preset":"rag","features":"-rag.filter"}`)
+	fsr := rag["conversation"].(map[string]any)["features"].(map[string]any)
+	if code != http.StatusCreated || fsr["rag.cite"] != true || fsr["task"] != true || fsr["rag.rewrite"] != true || fsr["rag.filter"] != false {
+		t.Fatalf("пресет rag: %d %v", code, fsr)
+	}
 	code, out = a.do(t, http.MethodPost, "/api/conversations/"+id+"/checkpoints", `{"name":"начало"}`)
 	cps := out["conversation"].(map[string]any)["checkpoints"].([]any)
 	if code != 200 || len(cps) != 1 {
@@ -211,6 +217,7 @@ func TestErrors(t *testing.T) {
 	}{
 		{http.MethodPost, "/api/conversations", `{bad`, 400},
 		{http.MethodPost, "/api/conversations", `{"text":"x","features":"+gaurd"}`, 400},
+		{http.MethodPost, "/api/conversations", `{"empty":true,"preset":"nope"}`, 400},
 		{http.MethodPost, "/api/conversations", `{"text":"  "}`, 400},
 		{http.MethodPut, "/api/conversations", ``, 405},
 		{http.MethodGet, "/api/conversations/", ``, 404},
