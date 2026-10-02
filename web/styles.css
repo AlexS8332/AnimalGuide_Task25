@@ -218,6 +218,34 @@ table.grid th { color: var(--muted); font-weight: 600; font-size: 12px; }
 .items .item.current { font-weight: 600; }
 a.small { font-size: 12px; font-weight: normal; margin-left: 4px; text-transform: none; letter-spacing: 0; }
 
+/* память задачи (v25): цель строкой, четыре списка колонками, чипы правок */
+#panel-task { order: -1; min-width: 620px; flex: 2; max-height: 210px; }
+#panel-task.task-off { min-width: 210px; flex: 0 1 260px; }
+#panel-task.editing { max-height: 360px; }
+#panel-task h2 button.small { text-transform: none; letter-spacing: 0; font-weight: normal; margin-left: 4px; }
+.task-version { font-size: 11px; text-transform: none; letter-spacing: 0; }
+.task-goal { font-size: 13px; padding: 3px 8px; margin-bottom: 5px; border-left: 3px solid var(--green); background: var(--green-soft); border-radius: 0 6px 6px 0; }
+.task-goal .lbl { text-transform: uppercase; font-size: 10px; letter-spacing: .5px; }
+.task-goal .task-text { font-weight: 600; }
+.task-goal.empty { border-left-color: var(--line); background: transparent; color: var(--muted); font-style: italic; }
+.task-lists { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px 12px; }
+.task-list h3 { font-size: 11px; color: var(--muted); font-weight: 600; margin-bottom: 1px; }
+.task-list ul { margin: 0; padding-left: 14px; font-size: 12.5px; }
+.task-list li { cursor: help; }
+.task-list[data-list="constraints"] li::marker { color: var(--brick); }
+.task-list[data-list="open"] li::marker { content: "? "; color: var(--amber); }
+.task-turn { color: var(--muted); font-size: 10px; white-space: nowrap; margin-left: 2px; }
+.task-form { display: flex; flex-direction: column; gap: 5px; }
+.task-field { display: flex; flex-direction: column; gap: 1px; }
+.task-field input, .task-field textarea { width: 100%; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: #fff; font-size: 12.5px; }
+.task-field textarea { resize: vertical; min-height: 52px; }
+.task-fields { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.task-form-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.chip.task-chip { background: var(--green-soft); border-color: #b9d6c4; }
+.chip.task-chip[data-op="remove"] { background: #fff; border-style: dashed; }
+.chip.task-chip.rejected { background: transparent; border-style: dashed; border-color: var(--line); color: var(--muted); text-decoration: line-through; text-decoration-color: #c9c1af; }
+.chip.task-chip .task-why { text-decoration: none; display: inline-block; }
+
 /* свод */
 .rule-retired { text-decoration: line-through; opacity: .6; }
 #panel-charter .chips { margin: 2px 0 4px; }

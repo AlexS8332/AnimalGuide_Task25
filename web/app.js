@@ -242,7 +242,14 @@ function renderExtPanels() {
       try { html += fn(c.extras[name], c) || ''; } catch (e) { html += `<section class="panel"><h2>${esc(name)}</h2><span class="hint">${esc(e.message)}</span></section>`; }
     }
   }
+  // Панель «Задача» (v25) — по механизму task, а не по extras: состояние
+  // приходит своим REST (taskAPI).
+  if (c) {
+    taskKeepDraft();
+    try { html += taskPanelHTML(c); } catch (e) { html += `<section class="panel" id="panel-task"><h2>Задача</h2><span class="hint">${esc(e.message)}</span></section>`; }
+  }
   box.innerHTML = html;
+  taskSync();
 }
 
 /* ---------- лента ---------- */
@@ -613,14 +620,15 @@ const actions = {
     const other = prompt('С кем сравнить «' + name + '»? Сравнение уйдёт в отдельную ветку.');
     if (other && other.trim()) sendTurn({ kind: 'compare', a: name, b: other.trim(), text: 'Сравни: ' + name + ' и ' + other.trim() });
   },
-  async newDialog() {
-    try {
-      const d = (await api('POST', '/api/conversations', { empty: true })).conversation;
-      await refreshList();
-      app.live = null;
-      await loadConv(d.id);
-      $('composer-text').focus();
-    } catch (e) { toast(e.message, true); }
+  async newDialog() { await createDialog({ empty: true }); },
+  // newRagDialog — пресет «Справочная (RAG)» (v25): пустой диалог, где поверх
+  // умолчаний включены база знаний с фильтром, переписыванием запроса,
+  // ответом с источниками и память задачи. Механизмы — строкой features
+  // того же REST создания («+rag,+task»); незнакомые серверу имена не шлём.
+  async newRagDialog() {
+    const known = ((app.meta && app.meta.mechanisms) || []).map(m => m.name);
+    const names = known.length ? ragPreset.filter(n => known.includes(n)) : ragPreset;
+    await createDialog({ empty: true, title: 'Справочная (RAG)', features: names.map(n => '+' + n).join(',') });
   },
   async pickDialog(id) { if (id) { app.live = null; if (app.stream) app.stream.close(); await loadConv(id); } },
   async switchBranch(id) { await convAction('switch', { branch: id }); },
@@ -647,6 +655,18 @@ const actions = {
   closeWindow() { $('window').close(); },
 };
 app.actions = actions;
+
+const ragPreset = ['rag', 'rag.filter', 'rag.rewrite', 'rag.cite', 'task'];
+
+async function createDialog(body) {
+  try {
+    const d = (await api('POST', '/api/conversations', body)).conversation;
+    await refreshList();
+    app.live = null;
+    await loadConv(d.id);
+    $('composer-text').focus();
+  } catch (e) { toast(e.message, true); }
+}
 
 async function convAction(action, body) {
   if (!app.conv) return;
@@ -945,6 +965,232 @@ Object.assign(actions, {
       $('window-body').innerHTML = `<p class="hint">${esc(f.path)}</p><pre>${esc(f.json)}</pre>`;
     } catch (e) { toast(e.message, true); }
   },
+});
+
+/* ---------- память задачи: панель на пульте и чипы правок (v25) ----------
+   Состояние задачи принадлежит ветке диалога: цель, что уточнено,
+   ограничения, термины, открытые вопросы. Пишет его извлекатель (у пункта —
+   цитата реплики человека и номер хода), а человек может поправить руками
+   формой на панели. Механизм task выключен — панель свёрнута в подсказку. */
+
+// taskAPI — единственное место с путями REST памяти задачи: состояние
+// текущей ветки диалога. GET → State, PUT State → State. Ответ в обёртке
+// {task: State} тоже принимается.
+const taskAPI = {
+  path: conv => `/api/conversations/${encodeURIComponent(conv)}/task`,
+  async get(conv) { return taskUnwrap(await api('GET', taskAPI.path(conv))); },
+  async put(conv, state) { return taskUnwrap(await api('PUT', taskAPI.path(conv), state)); },
+};
+app.taskAPI = taskAPI;
+
+function taskUnwrap(r) {
+  return r && r.task && typeof r.task === 'object' && !Array.isArray(r.task) ? r.task : (r || {});
+}
+
+const task = {
+  key: '',        // диалог/ветка/число ходов, для которых загружено state
+  state: null,    // State ветки
+  error: '',
+  loading: '',    // ключ идущей загрузки
+  editing: false,
+  draft: null,    // недописанная форма — переживает перерисовку пульта
+};
+app.task = task;
+
+const taskLists = [
+  ['clarified', 'Уточнено'],
+  ['constraints', 'Ограничения'],
+  ['terms', 'Термины'],
+  ['open', 'Открыто'],
+];
+// taskListOne — название списка в чипе: «+ ограничение: без латыни».
+const taskListOne = { goal: 'цель', clarified: 'уточнено', constraints: 'ограничение', terms: 'термин', open: 'открыто' };
+
+function taskMech(c) { return c && (c.mechanisms || []).find(m => m.name === 'task'); }
+function taskKey(c) {
+  const b = (c.branchTree || []).find(x => x.active);
+  return `${c.id}/${b ? b.id : ''}/${c.turnList.length}`;
+}
+
+// taskSync — подтянуть состояние, если диалог, ветка или число ходов
+// сменились (ход мог поправить задачу). Перерисовывает только панель.
+function taskSync() {
+  const c = app.conv;
+  if (!c || !taskMech(c) || !taskMech(c).on) return;
+  const key = taskKey(c);
+  if (task.key === key || task.loading === key) return;
+  task.loading = key;
+  const done = (st, err) => {
+    if (task.loading !== key) return; // пока шёл запрос, ветка или ход сменились
+    task.loading = '';
+    task.key = key;
+    task.state = st;
+    task.error = err;
+    if (app.conv && taskKey(app.conv) === key) taskPaint();
+  };
+  taskAPI.get(c.id).then(st => done(st, ''), e => done(null, e.message));
+}
+
+// taskState — что показывать: загруженное для этой ветки, иначе то, что
+// пришло в самом диалоге (если сервер его кладёт), иначе null.
+function taskState(c) {
+  if (task.key === taskKey(c) && task.state) return task.state;
+  return c.task || null;
+}
+
+function taskPaint() {
+  const old = $('panel-task');
+  if (!old || !app.conv) return;
+  taskKeepDraft();
+  old.outerHTML = taskPanelHTML(app.conv);
+}
+
+function taskTip(turn, quote) {
+  return [turn ? 'ход ' + turn : 'внесено руками', quote ? '«' + quote + '»' : ''].filter(Boolean).join(' · ');
+}
+function taskTurn(turn) { return turn ? ` <span class="task-turn">ход ${esc(turn)}</span>` : ''; }
+
+function taskPanelHTML(c) {
+  const m = taskMech(c);
+  if (!m) return '';
+  if (!m.on) {
+    return `<section class="panel task-off" id="panel-task"><h2>Задача</h2>
+      <div class="hint">включите «${esc(m.title || 'Память задачи')}» — цель, ограничения и термины разговора будут видны здесь
+        <button type="button" class="small" data-action="toggleMechanism" data-arg="task" data-on="">включить</button></div></section>`;
+  }
+  if (task.editing && task.editConv !== c.id) { task.editing = false; task.draft = null; }
+  const st = taskState(c);
+  const head =`<h2>Задача${st ? ` <span class="hint task-version" title="Сколько раз состояние менялось">v${esc(st.version || 0)}</span>` : ''}
+    ${task.editing ? '' : `<button type="button" class="small" id="task-edit" data-action="taskEdit"${st ? '' : ' disabled'}>править</button>`}</h2>`;
+  if (!st) {
+    const why = task.error ? `не загрузилась: ${esc(task.error)}` : 'загружаю…';
+    return `<section class="panel wide" id="panel-task">${head}<div class="hint">${why}</div></section>`;
+  }
+  if (task.editing) return `<section class="panel wide editing" id="panel-task">${head}${taskFormHTML(st)}</section>`;
+  const goal = st.goal
+    ? `<div class="task-goal" title="${esc(taskTip(st.goal_turn, st.goal_quote))}"><span class="lbl">цель</span><span class="task-text">${esc(st.goal)}</span>${taskTurn(st.goal_turn)}</div>`
+    : '<div class="task-goal empty">цель ещё не названа</div>';
+  const lists = taskLists.map(([key, title]) => {
+    const items = (st[key] || []).map(it => key === 'terms'
+      ? `<li title="${esc(taskTip(it.turn, it.quote))}"><span class="task-text"><b>${esc(it.term)}</b> → ${esc(it.meaning)}</span>${taskTurn(it.turn)}</li>`
+      : `<li title="${esc(taskTip(it.turn, it.quote))}"><span class="task-text">${esc(it.text)}</span>${taskTurn(it.turn)}</li>`).join('');
+    return `<div class="task-list" data-list="${key}"><h3>${esc(title)}</h3>${items ? `<ul>${items}</ul>` : '<span class="hint">—</span>'}</div>`;
+  }).join('');
+  return `<section class="panel wide" id="panel-task">${head}${goal}<div class="task-lists">${lists}</div>
+    ${task.error ? `<div class="hint">${esc(task.error)}</div>` : ''}</section>`;
+}
+
+// taskFormHTML — правка руками: цель — строка, списки — по пункту в строке,
+// термины — «термин = значение».
+function taskFormHTML(st) {
+  const d = task.draft || {
+    goal: st.goal || '',
+    clarified: (st.clarified || []).map(x => x.text).join('\n'),
+    constraints: (st.constraints || []).map(x => x.text).join('\n'),
+    terms: (st.terms || []).map(x => x.term + ' = ' + x.meaning).join('\n'),
+    open: (st.open || []).map(x => x.text).join('\n'),
+  };
+  const area = (key, title, hint) => `<label class="task-field" data-list="${key}"><span class="lbl">${esc(title)}</span>
+    <textarea name="${key}" rows="3" placeholder="${esc(hint)}">${esc(d[key])}</textarea></label>`;
+  return `<form id="task-form" class="task-form" data-submit="taskSave">
+    <label class="task-field goal"><span class="lbl">Цель</span><input name="goal" type="text" value="${esc(d.goal)}" placeholder="например: доклад для школьников о кошках Азии"></label>
+    <div class="task-fields">
+      ${area('clarified', 'Уточнено', 'по пункту в строке')}
+      ${area('constraints', 'Ограничения', 'без латыни')}
+      ${area('terms', 'Термины', 'барс = ирбис')}
+      ${area('open', 'Открыто', 'по пункту в строке')}
+    </div>
+    <div class="task-form-actions">
+      <button type="submit" class="solid small" id="task-save">сохранить</button>
+      <button type="button" class="ghost small" id="task-cancel" data-action="taskCancel">отмена</button>
+      <span class="hint">по пункту в строке; термин — «термин = значение»; пустая строка — пункт убран</span>
+    </div></form>`;
+}
+
+function taskReadForm() {
+  const f = $('task-form');
+  if (!f) return null;
+  const v = name => f.elements[name] ? f.elements[name].value : '';
+  return { goal: v('goal'), clarified: v('clarified'), constraints: v('constraints'), terms: v('terms'), open: v('open') };
+}
+function taskKeepDraft() { if (task.editing) task.draft = taskReadForm() || task.draft; }
+
+// taskFromForm — State из формы. Пункт, оставшийся тем же текстом, сохраняет
+// цитату и номер хода; новый — «внесено руками» (ход 0, без цитаты).
+function taskFromForm(d, old) {
+  const lines = s => String(s || '').split('\n').map(x => x.trim()).filter(Boolean);
+  const out = { goal: d.goal.trim(), version: old.version || 0 };
+  if (out.goal && out.goal === old.goal) {
+    if (old.goal_quote) out.goal_quote = old.goal_quote;
+    if (old.goal_turn) out.goal_turn = old.goal_turn;
+  }
+  for (const key of ['clarified', 'constraints', 'open']) {
+    out[key] = lines(d[key]).map(text => Object.assign({}, (old[key] || []).find(x => x.text === text) || { text, turn: 0 }));
+  }
+  out.terms = lines(d.terms).map(line => {
+    const i = line.indexOf('=');
+    const term = i < 0 ? '' : line.slice(0, i).trim(), meaning = i < 0 ? '' : line.slice(i + 1).trim();
+    if (!term || !meaning) throw new Error(`термин «${line}»: нужно «термин = значение»`);
+    return Object.assign({}, (old.terms || []).find(x => x.term === term && x.meaning === meaning) || { term, meaning, turn: 0 });
+  });
+  return out;
+}
+
+Object.assign(actions, {
+  taskEdit() {
+    if (!app.conv || !taskState(app.conv)) return;
+    task.editing = true;
+    task.editConv = app.conv.id;
+    task.draft = null;
+    taskPaint();
+    const f = $('task-form');
+    if (f) f.elements.goal.focus();
+  },
+  taskCancel() {
+    task.editing = false;
+    task.draft = null;
+    taskPaint();
+  },
+  async taskSave() {
+    const c = app.conv;
+    const old = c && taskState(c);
+    const d = taskReadForm();
+    if (!old || !d) return;
+    let next;
+    try { next = taskFromForm(d, old); } catch (e) { toast(e.message, true); return; }
+    const btn = $('task-save');
+    if (btn) btn.disabled = true;
+    try {
+      const st = await taskAPI.put(c.id, next);
+      if (!app.conv || app.conv.id !== c.id) return;
+      task.state = st;
+      task.key = taskKey(app.conv);
+      task.error = '';
+      task.editing = false;
+      task.draft = null;
+      toast('Задача сохранена');
+    } catch (e) {
+      toast('Задача не сохранена: ' + e.message, true);
+    }
+    taskPaint();
+  },
+});
+
+// Чипы правок задачи под ответом: extras.task хода — список Change
+// ({op, list, text, reason}); допускается и {changes: [...]}.
+app.chips.task = v => (Array.isArray(v) ? v : (v && v.changes) || []).map(c => {
+  const what = taskListOne[c.list] || c.list || '';
+  let text, cls = 'ok';
+  switch (c.op) {
+    case 'set_goal': text = 'цель: ' + c.text; break;
+    case 'add': text = `+ ${what}: ${c.text}`; break;
+    case 'remove': text = `− ${what}: ${c.text}`; cls = ''; break;
+    case 'reject': text = `не принято: ${what}: ${c.text}`; cls = 'rejected'; break;
+    default: text = `${what}: ${c.text}`; cls = '';
+  }
+  const tip = c.op === 'reject' ? 'Отклонено: ' + (c.reason || 'причина не указана') : (c.reason || 'память задачи ветки');
+  const why = c.op === 'reject' && c.reason ? ` <span class="task-why">— ${esc(c.reason)}</span>` : '';
+  return `<span class="chip task-chip ${cls}" data-op="${esc(c.op)}" data-list="${esc(c.list)}" title="${esc(tip)}">🎯 ${esc(text)}${why}</span>`;
 });
 
 /* ---------- MCP-сервер: окно и статус на пульте ---------- */
