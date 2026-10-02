@@ -14,7 +14,7 @@
 // Кто пишет. Извлекатель (internal/extract) — тем же единственным запросом,
 // что раскладывает реплику по памяти, профилю и фактам (бюджет ТЗ: не больше
 // 4 запросов к модели на ход). У каждого пункта — дословная цитата из
-// реплики ЧЕЛОВЕКА (Quote), сверяемая кодом (words.InReply): источник или
+// реплики ЧЕЛОВЕКА (Quote), сверяемая кодом (checkQuote): источник или
 // ответ ассистента задачу не меняют (ИП-14).
 //
 // Где используется. Блок механизма task (features.Task) — в каждом запросе
@@ -22,18 +22,17 @@
 // Переписывание запроса к базе (retrieve) получает термины задачи
 // («барс = ирбис») и вид из цели для вопросов-продолжений.
 //
-// Пакет — лист: импортирует только words. Поэтому его можно звать отовсюду
+// Пакет — лист: импортирует только стандартную библиотеку. Поэтому его можно звать отовсюду
 // (history, extract, retrieve, runs) без циклов импорта.
 package task
 
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
-
-	"github.com/AlexS8332/AnimalGuide_Task25/internal/words"
 )
 
 // ErrNotImplemented — заглушка контракта (оставлена для совместимости
@@ -148,50 +147,96 @@ func (s State) Size() int {
 // blockHeader — первая строка блока. Блок объясняет себя сам (П-3): без
 // пояснения модель принимает его за реплику человека или за указание
 // источника. «Меняется только словами человека» — чтобы ведущий не пытался
-// «обновить задачу» своим ответом и не спорил с ней.
-const blockHeader = "Задача разговора (ведёт код; меняется только словами человека). Держи её в каждом ответе: цель — рамка, ограничения — обязательны, термины — как человек называет вещи. Сам блок не пересказывай."
+// «обновить задачу» своим ответом и не спорил с ней. Про пересказ — без
+// запрета: «напомни цель» и есть просьба пересказать блок, и запрет
+// «не пересказывай» спорил бы с ней.
+const blockHeader = "Задача разговора (ведёт код; меняется только словами человека). Держи её в каждом ответе: цель — рамка, ограничения — обязательны, термины — как человек называет вещи. Не повторяй блок без просьбы; на просьбу напомнить цель — перескажи его своими словами."
+
+// MaxBlockRunes — предел текста блока вместе с заголовком (≈ 300–400
+// токенов): блок уходит в каждый запрос ведущего, и восемь пунктов в
+// четырёх списках по 160 знаков сделали бы его дороже свода. Сверх предела
+// в блок не попадают самые старые пункты — кроме цели и ограничений: их
+// модель обязана держать всегда. Человек видит всё на панели «Задача».
+const MaxBlockRunes = 1200
 
 // Block — текст блока для ведущего: заголовок и строки «Цель: …»,
 // «Уточнено: …; …», «Ограничения: …», «Термины: «барс» = ирбис», «Открыто:
 // …». Пустое состояние — пустая строка (блок не уходит, механизм стоит
 // ноль). Цитаты в блок не идут: они нужны человеку и проверке, а модели —
-// только суть, и каждая цитата удвоила бы цену блока.
+// только суть, и каждая цитата удвоила бы цену блока. Длиннее
+// MaxBlockRunes — без старых пунктов и с хвостом «(+N пунктов на панели)».
 func (s State) Block() string {
 	body := s.Render()
 	if body == "" {
 		return ""
 	}
-	return blockHeader + "\n" + body
+	text := blockHeader + "\n" + body
+	if utf8.RuneCountInString(text) <= MaxBlockRunes {
+		return text
+	}
+	// Кандидаты на выпадение — пункты уточнений, терминов и открытого, от
+	// старых к новым; при равном ходе — в порядке блока.
+	type ref struct {
+		list string
+		i    int
+		turn int
+	}
+	var refs []ref
+	for i, it := range s.Clarified {
+		refs = append(refs, ref{ListClarified, i, it.Turn})
+	}
+	for i, t := range s.Terms {
+		refs = append(refs, ref{ListTerms, i, t.Turn})
+	}
+	for i, it := range s.Open {
+		refs = append(refs, ref{ListOpen, i, it.Turn})
+	}
+	sort.SliceStable(refs, func(a, b int) bool { return refs[a].turn < refs[b].turn })
+	skip := map[string]map[int]bool{ListClarified: {}, ListTerms: {}, ListOpen: {}}
+	for n, r := range refs {
+		skip[r.list][r.i] = true
+		text = blockHeader + "\n" + s.render(skip) + fmt.Sprintf("\n(+%d пунктов на панели)", n+1)
+		if utf8.RuneCountInString(text) <= MaxBlockRunes {
+			break
+		}
+	}
+	return text
 }
 
 // Render — строки состояния без заголовка (блок, запрос извлекателя,
 // журнал). Порядок постоянный: одинаковое состояние — одинаковый текст,
 // кэш префикса не ломается.
-func (s State) Render() string {
+func (s State) Render() string { return s.render(nil) }
+
+// render — Render без пунктов из skip (список → номера пунктов).
+func (s State) render(skip map[string]map[int]bool) string {
 	var lines []string
 	if s.Goal != "" {
 		lines = append(lines, "Цель: "+s.Goal)
 	}
-	add := func(title string, items []Item) {
-		if len(items) == 0 {
-			return
-		}
-		parts := make([]string, len(items))
+	add := func(title, list string, items []Item) {
+		var parts []string
 		for i, it := range items {
-			parts[i] = it.Text
+			if !skip[list][i] {
+				parts = append(parts, it.Text)
+			}
 		}
-		lines = append(lines, title+": "+strings.Join(parts, "; "))
-	}
-	add("Уточнено", s.Clarified)
-	add("Ограничения", s.Constraints)
-	if len(s.Terms) > 0 {
-		parts := make([]string, len(s.Terms))
-		for i, t := range s.Terms {
-			parts[i] = "«" + t.Term + "» = " + t.Meaning
+		if len(parts) > 0 {
+			lines = append(lines, title+": "+strings.Join(parts, "; "))
 		}
-		lines = append(lines, "Термины: "+strings.Join(parts, "; "))
 	}
-	add("Открыто", s.Open)
+	add("Уточнено", ListClarified, s.Clarified)
+	add("Ограничения", ListConstraints, s.Constraints)
+	var terms []string
+	for i, t := range s.Terms {
+		if !skip[ListTerms][i] {
+			terms = append(terms, "«"+t.Term+"» = "+t.Meaning)
+		}
+	}
+	if len(terms) > 0 {
+		lines = append(lines, "Термины: "+strings.Join(terms, "; "))
+	}
+	add("Открыто", ListOpen, s.Open)
 	return strings.Join(lines, "\n")
 }
 
@@ -331,17 +376,76 @@ func (s *State) Apply(p Patch, user string, turn int) []Change {
 	return out
 }
 
-// checkQuote — пустая строка: цитата есть и найдена в реплике. Политика
-// сверки — короткие слова считаются (keepShort), как у профиля и
-// подтверждений подборки: «и без латыни» целиком состоит из коротких слов.
+// checkQuote — пустая строка: цитата есть и найдена в реплике.
+//
+// Сверка строже, чем у профиля (words.InReply — «большинство слов»): по
+// большинству «Расскажи про ирбиса» находилась в «Расскажи про манула»
+// («расскажи», «про»), «барс это леопард» — в «А барс это кто?», и модель
+// ставила цель и термины, которых человек не говорил. Теперь цитата —
+// нормализованная подстрока реплики (регистр, ё, кавычки и знаки,
+// пробелы); если модель всё же поправила падеж или выкинула слово — каждое
+// значимое слово цитаты (от четырёх букв, и отрицания «не», «без», «нет»)
+// должно найтись в реплике по основе. Отрицания считаются, чтобы «без
+// латыни» не подтверждалось репликой «с латынью».
 func checkQuote(quote, user string) string {
 	if strings.TrimSpace(quote) == "" {
 		return reasonNoQuote
 	}
-	if ok, _ := words.InReply(quote, user, true); !ok {
+	if !quoted(quote, user) {
 		return reasonBadQuote
 	}
 	return ""
+}
+
+// quoted — цитата из реплики (см. checkQuote).
+func quoted(quote, user string) bool {
+	q, u := normQuote(quote), normQuote(user)
+	if q == "" {
+		return false
+	}
+	if strings.Contains(" "+u+" ", " "+q+" ") {
+		return true
+	}
+	have := strings.Fields(u)
+	n := 0
+	for _, w := range strings.Fields(q) {
+		if utf8.RuneCountInString(w) < 4 && !negation[w] {
+			continue
+		}
+		n++
+		if !hasWord(have, w) {
+			return false
+		}
+	}
+	return n > 0
+}
+
+var negation = map[string]bool{"не": true, "без": true, "нет": true, "ни": true}
+
+// hasWord — слово w есть среди have: короткое — целиком, длинное — по
+// основе (одна основа или одно — начало другого: «ирбиса» и «ирбисом»).
+func hasWord(have []string, w string) bool {
+	short := utf8.RuneCountInString(w) < 4
+	sw := stem(w)
+	for _, h := range have {
+		if h == w {
+			return true
+		}
+		if short {
+			continue
+		}
+		if sh := stem(h); sh == sw || strings.HasPrefix(h, sw) || strings.HasPrefix(w, sh) && utf8.RuneCountInString(sh) >= 4 {
+			return true
+		}
+	}
+	return false
+}
+
+// normQuote — строка для сверки цитаты: нижний регистр, ё → е, всё, кроме
+// букв и цифр (кавычки, тире, знаки), — пробел, пробелы схлопнуты.
+func normQuote(s string) string {
+	s = strings.ReplaceAll(strings.ToLower(s), "ё", "е")
+	return strings.Join(strings.FieldsFunc(s, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }), " ")
 }
 
 func (s *State) setGoal(g GoalPatch, user string, turn int) []Change {

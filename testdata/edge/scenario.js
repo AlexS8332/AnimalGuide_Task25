@@ -2291,7 +2291,7 @@
       const chips = qa('#feed .chip.task-chip');
       assert(chips.length === 6, 'чипов ' + chips.length + ': ' + chips.map(c => c.textContent).join(' | '));
       const by = (op, list) => chips.find(c => c.dataset.op === op && c.dataset.list === list);
-      assert(by('set_goal', 'goal') && by('set_goal', 'goal').textContent.includes('цель: доклад для школьников о кошках Азии'), 'нет чипа цели');
+      assert(by('set_goal', 'goal') && by('set_goal', 'goal').textContent.includes('цель: доклад для школьников о кошках Азии (была: рассказ о манулах)'), 'нет чипа цели с прежней: ' + (by('set_goal', 'goal') || {}).textContent);
       const add = chips.filter(c => c.dataset.op === 'add' && c.dataset.list === 'constraints').map(c => c.textContent);
       assert(add.some(t => t.includes('+ ограничение: без латыни')) && add.length === 2, 'ограничения: ' + add);
       assert(by('add', 'terms').textContent.includes('+ термин: барс = ирбис'), 'термин: ' + by('add', 'terms').textContent);
@@ -2364,6 +2364,29 @@
       assert($('task-form').elements.terms.value === 'просто строка', 'ввод потерян при перерисовке');
       click('#task-cancel');
       await taskReady();
+    });
+
+    await check('задача: задачу поменяли, пока открыта форма, — 409, сообщение и перечитанная панель', async () => {
+      click('#task-edit');
+      await until('форма', () => q('#task-form'));
+      // Пока форма открыта, задачу меняет «другая вкладка» — PUT с текущей версией.
+      const cur = await app.taskAPI.get(app.conv.id);
+      await app.taskAPI.put(app.conv.id, Object.assign({}, cur, { goal: 'сравнить манула и ирбиса' }));
+      const before = taskPuts().length;
+      taskForm({ goal: 'моя правка поверх старой версии' });
+      click('#task-save');
+      await until('PUT', () => taskPuts().length === before + 1);
+      await taskReady();
+      assert(JSON.parse(taskPuts()[before].body).version === cur.version, 'ушла не та версия: ' + taskPuts()[before].body);
+      assert(!$('toast').hidden && $('toast').classList.contains('bad') && $('toast').textContent.includes('задача изменилась, обновите'), 'нет сообщения: ' + $('toast').textContent);
+      assert(text('#panel-task .task-goal .task-text') === 'сравнить манула и ирбиса', 'панель не перечитана: ' + text('#panel-task .task-goal'));
+      assert(text('#panel-task .task-version') === 'v' + (cur.version + 1), 'версия: ' + text('#panel-task .task-version'));
+      // Вернуть цель для следующих проверок — уже с текущей версией.
+      const now = await app.taskAPI.get(app.conv.id);
+      await app.taskAPI.put(app.conv.id, Object.assign({}, now, { goal: 'доклад для 5 класса о кошках Азии' }));
+      app.task.key = '';
+      taskSync();
+      await until('цель вернулась', () => text('#panel-task .task-goal .task-text') === 'доклад для 5 класса о кошках Азии');
     });
 
     await check('задача: механизм выключен — свёрнутая подсказка', async () => {

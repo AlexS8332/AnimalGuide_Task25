@@ -30,6 +30,8 @@ type chatModel struct {
 	turns  map[string]dialogs.Turn // реплика → её ожидания
 	latin  map[string]bool         // реплики, где ответ с латынью и МСОП
 	broken string
+	// unknown — вопрос по базе, на который ведущий отвечает «не знаю».
+	unknown string
 }
 
 func newChatModel(t *testing.T) *chatModel {
@@ -107,7 +109,7 @@ func (m *chatModel) lead(req llm.Request, _ int) llm.Response {
 	var res rag.SearchResult
 	_ = json.Unmarshal([]byte(agentstest.LastReply(req, rag.ToolName)), &res)
 	tr := m.turns[user]
-	if tr.Unknown || len(res.Hits) == 0 {
+	if tr.Unknown || len(res.Hits) == 0 || user == m.unknown {
 		return llmtest.ToolCall(rag.FinishName, agentstest.Args(rag.Cited{Status: rag.StatusUnknown,
 			Answer: "в базе знаний этого нет", Clarify: "Рассказать о другом виде из базы?"}))
 	}
@@ -166,7 +168,7 @@ func TestChatTrial(t *testing.T) {
 	if res.Verdict() != Pass {
 		t.Fatalf("вердикт %s: %+v\n%v", res.Verdict(), res.Checks, res.Notes)
 	}
-	if c := find(t, res, "источники в каждом ответе (по базе, «не знаю», память задачи)", laneChatTask); c.Got != "29 из 29" {
+	if c := find(t, res, "источники показаны в каждом ответе (по базе, «не знаю», память задачи)", laneChatTask); c.Got != "29 из 29" {
 		t.Fatalf("источники: %+v", c)
 	}
 	if c := find(t, res, "цель названа на контрольных репликах", ""); c.Got != "A 3/3, B 3/3" {
@@ -182,12 +184,28 @@ func TestChatTrial(t *testing.T) {
 	if c := find(t, res, "ограничения ответа не нарушены", ""); !strings.HasPrefix(c.Got, "0 из ") {
 		t.Fatalf("ограничения: %+v", c)
 	}
-	// Ведущий — один запрос на ход; извлекатель — не на каждой реплике.
-	if c := find(t, res, "запросов к модели на ход (в среднем)", ""); c.Status != Pass || !strings.HasPrefix(c.Got, "1.45 (42 на 29 ходов)") {
+	// Ведущий — один запрос на ход; извлекатель — не на каждой реплике (на
+	// вопросах о животном и на «напомни цель» — нет).
+	if c := find(t, res, "запросов к модели на ход (среднее и максимум)", ""); c.Status != Pass || !strings.HasPrefix(c.Got, "1.24 (36 на 29 ходов), максимум 2 (A·1)") {
 		t.Fatalf("запросы: %+v", c)
 	}
 	if c := find(t, res, "доля кэша на дорожке", ""); !strings.HasPrefix(c.Got, "70 %") {
 		t.Fatalf("кэш: %+v", c)
+	}
+	// B-8 с маркой restart: стенд перезапущен, задача ветки та же, и
+	// дорожки после перезапуска не перепутались (без памяти задачи цель
+	// по-прежнему не названа — ниже).
+	if c := find(t, res, "задача ветки та же после перезапуска приложения", ""); c.Status != Pass || c.Got != "1 из 1" {
+		t.Fatalf("перезапуск: %+v", c)
+	}
+	if v := metric(res, "ответ по базе там, где ждали (проверка sources, отчётно)", laneChatTask); v != "29 из 29" {
+		t.Fatalf("sources: %q", v)
+	}
+	if v := metric(res, "опора на цитаты: answered с grounded (отчётно)", laneChatTask); !strings.Contains(v, " из 22") {
+		t.Fatalf("опора: %q", v)
+	}
+	if v := metric(res, "обязательные числа и слова в ответе (must, отчётно)", laneChatTask); !strings.HasPrefix(v, "0 из 2 (нет: ") {
+		t.Fatalf("must: %q", v)
 	}
 	// Без памяти задачи цель на контрольных не названа: разница больше
 	// шума (повтор совпал с основной).
@@ -219,13 +237,26 @@ func TestChatTrialBrokenSource(t *testing.T) {
 	r, m, tr := chatRig(t)
 	m.broken = "Сравни харзу и соболя по массе."
 	res := r.run(t, tr)
-	c := find(t, res, "источники в каждом ответе (по базе, «не знаю», память задачи)", "")
+	c := find(t, res, "источники показаны в каждом ответе (по базе, «не знаю», память задачи)", "")
 	if c.Status != Fail || c.Got != "28 из 29" || !strings.Contains(c.Note, "B·6") {
 		t.Fatalf("источники: %+v", c)
 	}
 	mustPass(t, res, "цель названа на контрольных репликах", "цель удержана в памяти задачи после выпадения из окна")
 	if res.Verdict() != Fail {
 		t.Fatalf("вердикт %s", res.Verdict())
+	}
+}
+
+// «Не знаю» на вопросе по базе: источники показаны (ближайшее или пустая
+// выдача — по ТЗ это показ), жёсткая проверка пройдена; что ответа по
+// базе не было там, где ждали, — отчётная строка.
+func TestChatTrialUnknownWhereExpected(t *testing.T) {
+	r, m, tr := chatRig(t)
+	m.unknown = "Где в Азии живёт камышовый кот?"
+	res := r.run(t, tr)
+	mustPass(t, res, "источники показаны в каждом ответе (по базе, «не знаю», память задачи)")
+	if v := metric(res, "ответ по базе там, где ждали (проверка sources, отчётно)", laneChatTask); !strings.HasPrefix(v, "28 из 29 (нет: A·12 (unknown") {
+		t.Fatalf("sources: %q", v)
 	}
 }
 

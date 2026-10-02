@@ -15,6 +15,7 @@ import (
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/features"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/history"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/llm"
+	"github.com/AlexS8332/AnimalGuide_Task25/internal/task"
 )
 
 // Дорожки И-13: справочная по пресету rag с памятью задачи, без неё и
@@ -30,7 +31,8 @@ const (
 // Пороги И-13 (предложение, задание 25).
 const (
 	chatGoalKept = 0.9 // цель в памяти задачи после выпадения из окна
-	chatMaxCalls = 4.0 // запросов к модели на ход в среднем
+	chatMaxCalls = 4.0 // запросов к модели на ход в среднем (ТЗ, раздел 10)
+	chatPeakCall = 12  // и не больше стольких на любом ходе
 	chatMinCache = 0.6 // доля токенов запроса из кэша
 )
 
@@ -49,26 +51,33 @@ var DefaultChatScenarios = []string{"eval/dialogs/a.json", "eval/dialogs/b.json"
 //
 // Жёсткие проверки — на основной дорожке, пороги ТЗ:
 //
-//  1. источники — проверка sources пройдена на 100 % ходов (ответ по базе
-//     с источниками, «не знаю» на вопросе вне базы, память задачи на
-//     контрольной реплике); ход с ошибкой — провал;
+//  1. источники показаны в каждом ответе (ТЗ, раздел 10;
+//     dialogs.SourcesShown): ответ по базе — со списком источников, «не
+//     знаю» — с ближайшим найденным или с пустой выдачей, ответ о разговоре
+//     — источник «память задачи»; ход с ошибкой — провал;
 //  2. цель названа на всех контрольных репликах каждого сценария (3 из 3);
 //  3. цель удержана в памяти задачи: на ходах, когда реплика с целью уже
-//     выпала из окна, task.State.Goal ветки непуста и содержит ключевые
-//     слова цели сценария — ≥ 90 % таких ходов;
+//     выпала из окна, цель ветки непуста, а в задаче ветки
+//     (task.State.Render — цель и уточнения: «школьники», «Азия» могут
+//     жить в уточнениях) есть все ключевые слова цели сценария — ≥ 90 %
+//     таких ходов;
 //  4. ограничения сценария (no_latin, latin, max_sentences, iucn) — 0
 //     нарушений («не определить» не считается);
-//  5. запросов к модели на ход — ≤ 4 в среднем;
-//  6. доля кэша — ≥ 60 % токенов запроса.
+//  5. запросов к модели на ход — ≤ 4 в среднем и ≤ 12 на любом ходе;
+//  6. доля кэша — ≥ 60 % токенов запроса;
+//  7. перезапуск: перед репликой с маркой restart стенд перезапускает
+//     приложение (Stand.Restart), и задача ветки после него та же, что до.
 //
 // «Выпала из окна» считается по сообщениям истории: перед ходом в истории
 // H сообщений, реплика с целью — сообщение с номером g (с нуля); окно
 // уходит модели последними Window сообщениями (history.Window), и реплики
 // с целью в нём нет, когда H − Window > g.
 //
-// Отчётно — ожидаемые doc_id в источниках, те же числа на двух других
-// дорожках и разница «основная − без памяти задачи» против шума
-// (|основная − повтор|): засчитывается только разница больше шума.
+// Отчётно — «ответ по базе там, где ждали» (проверка sources: по базе на
+// вопросе по базе, «не знаю» вне базы), ожидаемые doc_id в источниках,
+// опора ответов на цитаты (доля answered с grounded), must, те же числа на
+// двух других дорожках и разница «основная − без памяти задачи» против
+// шума (|основная − повтор|): засчитывается только разница больше шума.
 //
 // Нет kb.db или эмбеддера — проверки «не определено» с причиной. Без
 // модели — ошибка стенда, как у И-10.
@@ -94,12 +103,13 @@ func (t *Chat) Title() string {
 
 // chatChecks — жёсткие проверки основной дорожки.
 var chatChecks = []string{
-	"источники в каждом ответе (по базе, «не знаю», память задачи)",
+	"источники показаны в каждом ответе (по базе, «не знаю», память задачи)",
 	"цель названа на контрольных репликах",
 	"цель удержана в памяти задачи после выпадения из окна",
 	"ограничения ответа не нарушены",
-	"запросов к модели на ход (в среднем)",
+	"запросов к модели на ход (среднее и максимум)",
 	"доля кэша на дорожке",
+	"задача ветки та же после перезапуска приложения",
 }
 
 // chatLanes — дорожки И-13 поверх умолчаний приложения.
@@ -125,6 +135,10 @@ type chatPlay struct {
 	// памяти задачи; miss — где нет.
 	out, kept int
 	miss      []string
+	// restarts — перезапусков перед ходами сценария; same — из них задача
+	// ветки после перезапуска та же; changed — где нет.
+	restarts, same int
+	changed        []string
 }
 
 // chatLane — итог дорожки по обоим сценариям.
@@ -132,8 +146,11 @@ type chatLane struct {
 	plays []*chatPlay
 	turns int
 	calls int
-	usage llm.Usage
-	cost  llm.Cost
+	// peak — больше всего запросов к модели на одном ходе; peakAt — где.
+	peak   int
+	peakAt string
+	usage  llm.Usage
+	cost   llm.Cost
 }
 
 func (t *Chat) Run(ctx context.Context, s *Stand, r *Result) error {
@@ -252,6 +269,11 @@ func (t *Chat) play(ctx context.Context, sub *Stand, lanes []Lane, sc dialogs.Sc
 	sub.env.logf("  И-13: сценарий %s (%d реплик) — %s", sc.ID, len(sc.Turns), sc.Title)
 	for i, turn := range sc.Turns {
 		n := i + 1
+		if turn.Has(dialogs.MarkRestart) {
+			if err := t.restart(sub, g, sc, n, plays); err != nil {
+				return err
+			}
+		}
 		steps, err := g.Send(ctx, agents.Request{Text: turn.Text})
 		if err != nil {
 			return fmt.Errorf("И-13: сценарий %s, реплика %d: %w", sc.ID, n, err)
@@ -269,10 +291,11 @@ func (t *Chat) play(ctx context.Context, sub *Stand, lanes []Lane, sc dialogs.Sc
 			// ветки после хода.
 			if windowed[st.Lane] && p.goalAt >= 0 && p.before-window > p.goalAt {
 				p.out++
-				if goal := st.Detail.Task.Goal; strings.TrimSpace(goal) != "" && len(dialogs.GoalNamed(goal, sc.Goal.Keywords)) == 0 {
+				state := st.Detail.Task.Render()
+				if strings.TrimSpace(st.Detail.Task.Goal) != "" && len(dialogs.GoalNamed(state, sc.Goal.Keywords)) == 0 {
 					p.kept++
 				} else {
-					p.miss = append(p.miss, fmt.Sprintf("%s·%d «%s»", sc.ID, n, clip(orDash(goal), 60)))
+					p.miss = append(p.miss, fmt.Sprintf("%s·%d «%s»", sc.ID, n, clip(oneLine(state), 60)))
 				}
 			}
 			if st.Detail.ID != "" {
@@ -280,6 +303,9 @@ func (t *Chat) play(ctx context.Context, sub *Stand, lanes []Lane, sc dialogs.Sc
 			}
 			x.turns++
 			x.calls += st.Turn.Totals.LLMCalls
+			if st.Turn.Totals.LLMCalls > x.peak {
+				x.peak, x.peakAt = st.Turn.Totals.LLMCalls, fmt.Sprintf("%s·%d", sc.ID, n)
+			}
 			x.usage = x.usage.Add(st.Turn.Totals.Usage)
 			x.cost = x.cost.Add(st.Turn.Totals.Cost)
 			if bad := tr.Failed(); len(bad) > 0 {
@@ -293,6 +319,41 @@ func (t *Chat) play(ctx context.Context, sub *Stand, lanes []Lane, sc dialogs.Sc
 	return nil
 }
 
+// restart — перезапуск приложения перед ходом n (марка restart): снимок
+// задачи ветки каждой дорожки до, Stand.Restart, снимок после — задача та
+// же (файл диалога пережил перезапуск вместе с задачей ветки).
+func (t *Chat) restart(sub *Stand, g *Group, sc dialogs.Scenario, n int, plays map[string]*chatPlay) error {
+	before := map[string]task.State{}
+	for _, d := range g.Dialogs {
+		if det, ok := d.Detail(); ok {
+			before[d.Lane.Name] = det.Task
+		}
+	}
+	sub.env.logf("  И-13: сценарий %s, перезапуск приложения перед репликой %d", sc.ID, n)
+	if err := sub.Restart(); err != nil {
+		return fmt.Errorf("И-13: сценарий %s, перезапуск перед репликой %d: %w", sc.ID, n, err)
+	}
+	for _, d := range g.Dialogs {
+		p := plays[d.Lane.Name]
+		p.restarts++
+		det, ok := d.Detail()
+		was := before[d.Lane.Name]
+		switch {
+		case !ok:
+			p.changed = append(p.changed, fmt.Sprintf("%s·%d: диалог не поднялся", sc.ID, n))
+		case det.Task.Render() != was.Render() || det.Task.Version != was.Version:
+			p.changed = append(p.changed, fmt.Sprintf("%s·%d: v%d «%s» → v%d «%s»", sc.ID, n,
+				was.Version, clip(oneLine(was.Render()), 50), det.Task.Version, clip(oneLine(det.Task.Render()), 50)))
+		default:
+			p.same++
+		}
+	}
+	return nil
+}
+
+// oneLine — строки задачи через «; » (или прочерк).
+func oneLine(s string) string { return orDash(strings.ReplaceAll(s, "\n", "; ")) }
+
 func checkNames(cs []dialogs.Check) string {
 	var out []string
 	for _, c := range cs {
@@ -303,8 +364,16 @@ func checkNames(cs []dialogs.Check) string {
 
 // chatTally — счёт дорожки по проверкам ходов.
 type chatTally struct {
+	shown, shownTotal     int
+	shownMiss             []string
 	sources, sourcesTotal int
 	srcMiss               []string
+	grounded, answered    int
+	groundMiss            []string
+	must, mustTotal       int
+	mustMiss              []string
+	restarts, same        int
+	changed               []string
 	docs, docsTotal       int
 	violations, ruled     int
 	violMiss              []string
@@ -330,12 +399,32 @@ func tallyOf(x *chatLane) chatTally {
 		ok, total := 0, 0
 		for _, tr := range p.rep.Turns {
 			id := fmt.Sprintf("%s·%d", p.rep.Scenario, tr.N)
+			c.shownTotal++
+			if ok, got := dialogs.SourcesShown(tr.Observed); ok {
+				c.shown++
+			} else {
+				c.shownMiss = append(c.shownMiss, id+" ("+got+")")
+			}
 			c.sourcesTotal++
 			src := false
 			for _, ch := range tr.Checks {
 				switch {
 				case ch.Name == dialogs.CheckSources:
 					src = ch.OK
+				case ch.Name == dialogs.CheckGrounded && !ch.NA:
+					c.answered++
+					if ch.OK {
+						c.grounded++
+					} else {
+						c.groundMiss = append(c.groundMiss, id+": "+ch.Got)
+					}
+				case ch.Name == dialogs.CheckMust:
+					c.mustTotal++
+					if ch.OK {
+						c.must++
+					} else {
+						c.mustMiss = append(c.mustMiss, id+" "+ch.Got)
+					}
 				case ch.Name == dialogs.CheckDocs:
 					c.docsTotal++
 					if ch.OK {
@@ -371,6 +460,9 @@ func tallyOf(x *chatLane) chatTally {
 		c.kept += p.kept
 		c.out += p.out
 		c.keptMiss = append(c.keptMiss, p.miss...)
+		c.restarts += p.restarts
+		c.same += p.same
+		c.changed = append(c.changed, p.changed...)
 	}
 	return c
 }
@@ -380,12 +472,12 @@ func (t *Chat) judge(r *Result, scs []dialogs.Scenario, res map[string]*chatLane
 	x := res[laneChatTask]
 	c := tallyOf(x)
 
-	ch := Check{What: chatChecks[0], Want: "100 % ходов", Lane: laneChatTask, Got: fmt.Sprintf("%d из %d", c.sources, c.sourcesTotal), Status: Pass}
+	ch := Check{What: chatChecks[0], Want: "100 % ходов", Lane: laneChatTask, Got: fmt.Sprintf("%d из %d", c.shown, c.shownTotal), Status: Pass}
 	switch {
-	case c.sourcesTotal == 0:
+	case c.shownTotal == 0:
 		ch.Status, ch.Note = Fail, "ходов нет"
-	case c.sources < c.sourcesTotal:
-		ch.Status, ch.Note = Fail, "не пройдено: "+strings.Join(firstN(c.srcMiss, 6), ", ")
+	case c.shown < c.shownTotal:
+		ch.Status, ch.Note = Fail, "не показаны: "+strings.Join(firstN(c.shownMiss, 6), ", ")
 	}
 	r.check(ch)
 
@@ -420,9 +512,9 @@ func (t *Chat) judge(r *Result, scs []dialogs.Scenario, res map[string]*chatLane
 	if x.turns > 0 {
 		per = float64(x.calls) / float64(x.turns)
 	}
-	ch = Check{What: chatChecks[4], Want: fmt.Sprintf("≤ %.0f", chatMaxCalls), Lane: laneChatTask,
-		Got: fmt.Sprintf("%.2f (%d на %d ходов)", per, x.calls, x.turns), Status: Pass}
-	if x.turns == 0 || per > chatMaxCalls {
+	ch = Check{What: chatChecks[4], Want: fmt.Sprintf("среднее ≤ %.0f и максимум ≤ %d", chatMaxCalls, chatPeakCall), Lane: laneChatTask,
+		Got: fmt.Sprintf("%.2f (%d на %d ходов), максимум %d (%s)", per, x.calls, x.turns, x.peak, orDash(x.peakAt)), Status: Pass}
+	if x.turns == 0 || per > chatMaxCalls || x.peak > chatPeakCall {
 		ch.Status = Fail
 	}
 	r.check(ch)
@@ -438,6 +530,24 @@ func (t *Chat) judge(r *Result, scs []dialogs.Scenario, res map[string]*chatLane
 		}
 	}
 	r.check(ch)
+
+	ch = Check{What: chatChecks[6], Want: "та же на каждом перезапуске", Lane: laneChatTask,
+		Got: fmt.Sprintf("%d из %d", c.same, c.restarts), Status: Pass}
+	switch {
+	case c.restarts == 0:
+		ch.Status, ch.Got, ch.Note = Pending, "—", "в сценариях нет реплики с маркой restart"
+	case c.same < c.restarts:
+		ch.Status, ch.Note = Fail, strings.Join(firstN(c.changed, 3), "; ")
+	}
+	r.check(ch)
+}
+
+// missNote — « (нет: …)» по первым трём провалам или пусто.
+func missNote(miss []string) string {
+	if len(miss) == 0 {
+		return ""
+	}
+	return " (нет: " + strings.Join(firstN(miss, 3), "; ") + ")"
 }
 
 // report — отчётные числа всех дорожек и разница «с памятью задачи — без»
@@ -448,7 +558,12 @@ func (t *Chat) report(r *Result, lanes []Lane, scs []dialogs.Scenario, res map[s
 		x := res[l.Name]
 		c := tallyOf(x)
 		tallies[l.Name] = c
-		r.metric("источники (проверка sources)", l.Name, "%d из %d", c.sources, c.sourcesTotal)
+		r.metric("источники показаны", l.Name, "%d из %d", c.shown, c.shownTotal)
+		r.metric("ответ по базе там, где ждали (проверка sources, отчётно)", l.Name, "%d из %d%s", c.sources, c.sourcesTotal, missNote(c.srcMiss))
+		r.metric("опора на цитаты: answered с grounded (отчётно)", l.Name, "%d из %d%s", c.grounded, c.answered, missNote(c.groundMiss))
+		if c.mustTotal > 0 {
+			r.metric("обязательные числа и слова в ответе (must, отчётно)", l.Name, "%d из %d%s", c.must, c.mustTotal, missNote(c.mustMiss))
+		}
 		r.metric("цель на контрольных репликах", l.Name, "%d из %d (%s)", c.goal, c.goalTotal, strings.Join(c.goalBy, ", "))
 		if l.Features.On(features.Task) {
 			r.metric("цель в памяти задачи после выпадения из окна", l.Name, "%d из %d", c.kept, c.out)
@@ -458,7 +573,7 @@ func (t *Chat) report(r *Result, lanes []Lane, scs []dialogs.Scenario, res map[s
 		r.metric("нарушений ограничений", l.Name, "%d из %d определимых", c.violations, c.ruled)
 		r.metric("ожидаемые doc_id в источниках (отчётно)", l.Name, "%d из %d", c.docs, c.docsTotal)
 		if x.turns > 0 {
-			r.metric("запросов к модели на ход", l.Name, "%.2f", float64(x.calls)/float64(x.turns))
+			r.metric("запросов к модели на ход", l.Name, "%.2f, максимум %d", float64(x.calls)/float64(x.turns), x.peak)
 		}
 		if x.usage.Prompt > 0 {
 			r.metric("доля кэша", l.Name, "%.0f %%", 100*float64(x.usage.CacheHit)/float64(x.usage.Prompt))
@@ -479,7 +594,7 @@ func (t *Chat) report(r *Result, lanes []Lane, scs []dialogs.Scenario, res map[s
 	}
 	diff("разница: цель названа на контрольных", m.goal, no.goal, rep.goal)
 	diff("разница: нарушений ограничений", m.violations, no.violations, rep.violations)
-	diff("разница: ходов с источниками", m.sources, no.sources, rep.sources)
+	diff("разница: ходов с показанными источниками", m.shown, no.shown, rep.shown)
 }
 
 // samples — 3–4 хода: последняя контрольная реплика первого сценария на

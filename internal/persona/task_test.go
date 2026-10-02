@@ -103,7 +103,7 @@ func TestTaskAPI(t *testing.T) {
 	if code, v := call(http.MethodGet, ""); code != 200 || !v.On || v.Block != "" || v.Limits.Items != task.MaxItems {
 		t.Fatalf("GET пустой: %d %+v", code, v)
 	}
-	code, v := call(http.MethodPut, `{"goal":" сравнить манула и ирбиса ","constraints":[{"text":"без латыни"},{"text":"Без латыни"}],"terms":[{"term":"барс","meaning":"ирбис"}],"version":99}`)
+	code, v := call(http.MethodPut, `{"goal":" сравнить манула и ирбиса ","constraints":[{"text":"без латыни"},{"text":"Без латыни"}],"terms":[{"term":"барс","meaning":"ирбис"}],"version":0}`)
 	if code != 200 || v.Task.Goal != "сравнить манула и ирбиса" || len(v.Task.Constraints) != 1 || v.Task.Version != 1 || !strings.Contains(v.Block, "«барс» = ирбис") {
 		t.Fatalf("PUT: %d %+v", code, v)
 	}

@@ -22,6 +22,10 @@ type Observed struct {
 	Reply  string        `json:"reply"`
 	Error  string        `json:"error,omitempty"`
 	Cite   *rag.CiteView `json:"cite,omitempty"`
+	// Grounded — признак опоры ответа на цитаты от проверки rag.cite
+	// (check.grounded итога хода), если она его даёт; nil — нет, и опора
+	// считается по NumbersMissing и SpeciesMismatch (IsGrounded).
+	Grounded *bool `json:"grounded,omitempty"`
 }
 
 // FromTurn — наблюдение из записи хода в истории диалога: то же, что kb
@@ -36,8 +40,61 @@ func FromTurn(t history.Turn) Observed {
 	var v rag.CiteView
 	if t.Extra(string(features.RAGCite), &v) {
 		o.Cite = &v
+		var g struct {
+			Check struct {
+				Grounded *bool `json:"grounded"`
+			} `json:"check"`
+		}
+		if t.Extra(string(features.RAGCite), &g) {
+			o.Grounded = g.Check.Grounded
+		}
 	}
 	return o
+}
+
+// IsGrounded — ответ по базе опирается на свои цитаты: признак проверки
+// rag.cite (Observed.Grounded), а без него — у ответа нет чисел вне цитат
+// (NumbersMissing) и видов без цитаты о них (SpeciesMismatch). Второе
+// значение — что не так.
+func (o Observed) IsGrounded() (bool, string) {
+	if o.Cite == nil {
+		return false, "нет итога rag.cite"
+	}
+	if o.Grounded != nil {
+		if *o.Grounded {
+			return true, "опирается"
+		}
+		return false, "проверка: не опирается"
+	}
+	var why []string
+	if len(o.Cite.Check.NumbersMissing) > 0 {
+		why = append(why, "чисел нет в цитатах: "+strings.Join(o.Cite.Check.NumbersMissing, ", "))
+	}
+	if len(o.Cite.Check.SpeciesMismatch) > 0 {
+		why = append(why, "виды без цитаты о них: "+strings.Join(o.Cite.Check.SpeciesMismatch, ", "))
+	}
+	if len(why) > 0 {
+		return false, strings.Join(why, "; ")
+	}
+	return true, "опирается"
+}
+
+// SourcesShown — ответ показал источники так, как велит ТЗ (раздел 10):
+// по базе — со списком источников; «не знаю» — с ближайшим найденным или
+// с пустой выдачей (честно пустой список — тоже показ); о разговоре —
+// источник «память задачи». Не путать с проверкой sources: та ещё и
+// сверяет, ждали ли здесь ответа по базе.
+func SourcesShown(o Observed) (bool, string) {
+	switch st := o.Status(); st {
+	case "answered":
+		return len(o.Cite.Sources) > 0 && o.Cite.Check.HasSources, fmt.Sprintf("answered, источников %d", len(o.Cite.Sources))
+	case "unknown":
+		return true, fmt.Sprintf("unknown, ближайших %d", len(o.Cite.Sources))
+	case "meta":
+		return true, "meta: " + orDash(o.Cite.MetaSource)
+	default:
+		return false, st
+	}
 }
 
 // Status — как ответил ход: answered (по базе), unknown («не знаю»), meta
@@ -84,10 +141,13 @@ func (o Observed) answer() string {
 }
 
 // Check — одна проверка хода. NA — «не определить» (в знаменатель не идёт).
+// Soft — отчётная: в итогах считается, но провалом хода не делает (must,
+// grounded — признаки качества ответа, а не договорённости разговора).
 type Check struct {
 	Name string `json:"name"`
 	OK   bool   `json:"ok"`
 	NA   bool   `json:"na,omitempty"`
+	Soft bool   `json:"soft,omitempty"`
 	Want string `json:"want,omitempty"`
 	Got  string `json:"got,omitempty"`
 }
@@ -98,6 +158,10 @@ const (
 	CheckSources = "sources" // ответ с источниками (или «не знаю», где ждали; память задачи на контрольной)
 	CheckDocs    = "docs"    // ожидаемые doc_id среди источников
 	CheckGoal    = "goal"    // контрольная реплика: цель названа
+	CheckMust    = "must"    // в ответе есть обязательные числа и слова реплики
+	// CheckGrounded — ответ по базе опирается на цитаты (IsGrounded); у
+	// «не знаю» и ответа о разговоре не определить.
+	CheckGrounded = "grounded"
 )
 
 // latinRe — латинский бином («Lynx lynx»); тот же признак, что
@@ -109,8 +173,55 @@ var latinRe = regexp.MustCompile(`\b[A-Z][a-z]{2,}\s[a-z]{3,}\b`)
 // название.
 var iucnRe = regexp.MustCompile(`\b(LC|NT|VU|EN|CR|EW|EX|DD|NE)\b|(?i:вызывающ\p{L}* наименьш|уязвим|вымирающ|исчезающ|под угрозой|в опасности|недостаточно данных|не оценивал)`)
 
+// latinWordRe — слово латиницей от четырёх букв: род, семейство
+// («Felidae», «Martes», «Mustelinae»), одиночный эпитет.
+var latinWordRe = regexp.MustCompile(`\b[A-Za-z]{4,}\b`)
+
 // HasLatin — есть ли в тексте латинский бином.
 func HasLatin(text string) bool { return latinRe.MatchString(text) }
+
+// LatinFound — первое латинское название в тексте для проверки «без
+// латыни»: бином или одиночное слово латиницей от четырёх букв. Не латынь —
+// аббревиатуры: коды МСОП (LC, NT, VU, EN, CR, EW, EX, DD, NE) и «MDD»
+// короче четырёх букв, а «IUCN», «GBIF» целиком заглавные.
+func LatinFound(text string) string {
+	if m := latinRe.FindString(text); m != "" {
+		return m
+	}
+	for _, w := range latinWordRe.FindAllString(text, -1) {
+		if strings.ToUpper(w) != w {
+			return w
+		}
+	}
+	return ""
+}
+
+// numberRe — число в тексте: «8», «0,8», «1.4», «58».
+var numberRe = regexp.MustCompile(`\d+(?:[.,]\d+)?`)
+
+// MustMissing — какие обязательные пункты не нашлись в тексте: число — среди
+// чисел текста («0,8» и «0.8» — одно число, «8» не находится в «58»),
+// слово — по началу слова без учёта регистра и ё.
+func MustMissing(text string, must []string) []string {
+	nums := map[string]bool{}
+	for _, n := range numberRe.FindAllString(text, -1) {
+		nums[strings.ReplaceAll(n, ",", ".")] = true
+	}
+	var out []string
+	for _, m := range must {
+		m = strings.TrimSpace(m)
+		if m != "" && numberRe.FindString(m) == m {
+			if !nums[strings.ReplaceAll(m, ",", ".")] {
+				out = append(out, m)
+			}
+			continue
+		}
+		if len(GoalNamed(text, []string{m})) > 0 {
+			out = append(out, m)
+		}
+	}
+	return out
+}
 
 // HasIUCN — назван ли статус МСОП.
 func HasIUCN(text string) bool { return iucnRe.MatchString(text) }
@@ -197,6 +308,26 @@ func CheckTurn(s Scenario, n int, o Observed) []Check {
 		out = append(out, c)
 	}
 
+	// Обязательные числа и слова — в самом ответе, без цитат: число,
+	// которое стоит только в цитате, человек ответом не прочтёт.
+	if len(t.Must) > 0 {
+		missing := MustMissing(o.answer(), t.Must)
+		c := Check{Name: CheckMust, Soft: true, OK: len(missing) == 0, Want: strings.Join(t.Must, ", "), Got: "все"}
+		if len(missing) > 0 {
+			c.Got = "нет: " + strings.Join(missing, ", ")
+		}
+		out = append(out, c)
+	}
+
+	// Опора на цитаты — у ответа по базе.
+	g := Check{Name: CheckGrounded, Soft: true, Want: "числа и виды ответа — из цитат"}
+	if st == "answered" {
+		g.OK, g.Got = o.IsGrounded()
+	} else {
+		g.NA, g.Got = true, "не определить: "+st
+	}
+	out = append(out, g)
+
 	// Ограничения ответа. Требования «есть латынь», «есть статус» на «не
 	// знаю» и на контрольной реплике не определить; запреты и длина — на
 	// любом ответе.
@@ -214,7 +345,7 @@ func CheckTurn(s Scenario, n int, o Observed) []Check {
 		}
 		switch r.Kind {
 		case RuleNoLatin:
-			m := latinRe.FindString(text)
+			m := LatinFound(text)
 			c.OK, c.Want, c.Got = m == "", "без латыни", orDash(m)
 		case RuleLatin:
 			c.OK, c.Want, c.Got = HasLatin(text), "латинское название", yes(HasLatin(text))
@@ -270,11 +401,11 @@ type TurnReport struct {
 	Checks   []Check  `json:"checks"`
 }
 
-// Failed — непройденные проверки хода.
+// Failed — непройденные проверки хода (отчётные — не в счёт).
 func (t TurnReport) Failed() []Check {
 	var out []Check
 	for _, c := range t.Checks {
-		if !c.OK && !c.NA {
+		if !c.OK && !c.NA && !c.Soft {
 			out = append(out, c)
 		}
 	}
@@ -338,7 +469,7 @@ func (r Report) Tallies() []Tally {
 	return out
 }
 
-// Passed — все определимые проверки пройдены.
+// Passed — все определимые неотчётные проверки пройдены.
 func (r Report) Passed() bool {
 	for _, t := range r.Turns {
 		if len(t.Failed()) > 0 {

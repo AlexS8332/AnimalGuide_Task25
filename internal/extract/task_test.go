@@ -7,6 +7,7 @@ import (
 
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/llm"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/llm/llmtest"
+	"github.com/AlexS8332/AnimalGuide_Task25/internal/profile"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/task"
 )
 
@@ -98,6 +99,89 @@ func TestNothingKeepsTaskTurns(t *testing.T) {
 	for _, s := range []string{"А сколько они весят?", "Где живёт манул?", "Манул съедает мышь целиком?"} {
 		if !Nothing(s) {
 			t.Errorf("%q: вопрос о животном — извлекать нечего", s)
+		}
+	}
+}
+
+// Живой прогон A-1: извлекатель положил «простыми словами», «без латыни» и
+// «не больше пяти предложений» и в задачу, и в профиль. Правка профиля с
+// той же цитатой, что у принятого ограничения задачи, отбрасывается с
+// причиной; правка о человеке («я учитель») и разовая — остаются. Со
+// «всегда» в реплике профиль правится.
+func TestConversationConstraintsStayOutOfProfile(t *testing.T) {
+	const a1 = "Я готовлю доклад для школьников о диких кошках Азии. Объясняй простыми словами, без латыни и не больше пяти предложений. Начнём с манула: где он живёт?"
+	// Ответ модели из живого журнала (extras хода A-1) — дословно.
+	const reply = `{"profile": {"set": [{"field": "level", "value": "school", "scope": "always", "quote": "Объясняй простыми словами"},
+   {"field": "latin", "value": "hide", "scope": "always", "quote": "без латыни"},
+   {"field": "form", "value": "table", "scope": "once", "quote": "без латыни"}],
+  "limits": [{"text": "не больше пяти предложений", "scope": "always", "quote": "не больше пяти предложений"}]},
+ "task": {"goal": {"text": "подготовить доклад для школьников о диких кошках Азии", "quote": "Я готовлю доклад для школьников о диких кошках Азии."},
+  "add": [{"list": "constraints", "text": "объяснять простыми словами", "quote": "Объясняй простыми словами"},
+          {"list": "constraints", "text": "без латыни", "quote": "без латыни"},
+          {"list": "constraints", "text": "не больше пяти предложений", "quote": "не больше пяти предложений"}]}}`
+	run := func(user, reply string) Update {
+		t.Helper()
+		fake := &llmtest.Fake{Fn: func(req llm.Request) (llm.Response, error) { return llmtest.Text(reply), nil }}
+		in := input(user)
+		in.Targets = Targets{Profile: true, Task: true}
+		u, err := Extractor{LLM: fake, Model: llm.DefaultModel}.Run(context.Background(), in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u
+	}
+	u := run(a1, reply)
+	if len(u.Task.Constraints) != 3 || u.Task.Goal == "" {
+		t.Fatalf("задача: %+v", u.Task)
+	}
+	if u.Profile.Val(profile.FieldLatin) != "" || u.Profile.Val("level") != "" || len(u.Profile.Limits) != 0 || len(u.ProfileChanges.Applied()) != 0 {
+		t.Fatalf("ограничения разговора в профиле: %+v", u.ProfileChanges)
+	}
+	rejected := 0
+	for _, c := range u.ProfileChanges {
+		if c.Op == profile.OpReject && strings.Contains(c.Reason, "в задаче, а не в профиле") {
+			rejected++
+		}
+	}
+	if rejected != 3 {
+		t.Fatalf("отказов %d: %+v", rejected, u.ProfileChanges)
+	}
+
+	// «Всегда» — правило человека, профиль правится.
+	u = run("Всегда без латыни, пожалуйста.", `{"profile": {"set": [{"field": "latin", "value": "hide", "scope": "always", "quote": "Всегда без латыни"}]},
+ "task": {"add": [{"list": "constraints", "text": "без латыни", "quote": "без латыни"}]}}`)
+	if u.Profile.Val(profile.FieldLatin) != "hide" {
+		t.Fatalf("«всегда» не дошло до профиля: %+v", u.ProfileChanges)
+	}
+
+	// Правка о человеке с другой цитатой остаётся.
+	u = run("Я учитель. Отвечай коротко.", `{"profile": {"set": [{"field": "level", "value": "expert", "scope": "always", "quote": "Я учитель"},
+   {"field": "length", "value": "short", "scope": "always", "quote": "Отвечай коротко"}]},
+ "task": {"add": [{"list": "constraints", "text": "коротко", "quote": "Отвечай коротко"}]}}`)
+	if u.Profile.Val("level") != "expert" || u.Profile.Val("length") != "" {
+		t.Fatalf("профиль: %+v", u.ProfileChanges)
+	}
+}
+
+// Напоминание о разговоре без новых правок — извлекатель не нужен (минус
+// запрос на Meta-ходе); напоминание с правкой и напоминание о человеке —
+// нужен.
+func TestNothingOnReminder(t *testing.T) {
+	for _, s := range []string{
+		"Напомни, какая у нас цель и что мы решили.", "Напомни цель нашей проверки и что мы уже выяснили.",
+		"Напомни цель нашей проверки и что мы решили по формату ответов.", "Напомни цель", "Что мы решили?",
+		"Какая у нас цель?", "Напомните, о чём мы договорились?",
+	} {
+		if !Nothing(s) {
+			t.Errorf("%q: напоминание — извлекать нечего", s)
+		}
+	}
+	for _, s := range []string{
+		"Напомни, как меня зовут?", "Напомни цель и теперь отвечай без латыни.", "Напомни цель. Давай теперь про ирбиса.",
+		"Что мы решили? Я передумал, нужен урок.", "Напомни цель и впредь пиши коротко.",
+	} {
+		if Nothing(s) {
+			t.Errorf("%q: в напоминании правка — извлекатель нужен", s)
 		}
 	}
 }

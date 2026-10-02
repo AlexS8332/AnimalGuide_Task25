@@ -39,9 +39,14 @@ const (
 	MarkBare       = "bare"       // голое название животного
 	MarkCompare    = "compare"    // сравнение двух видов
 	MarkUnknown    = "unknown"    // вопрос вне базы
+	// MarkRestart — перед этой репликой перезапустить приложение (стенд
+	// И-13: Stand.Restart; задача ветки после перезапуска та же). Play и
+	// kb chat -script её пропускают: перезапустить чужой процесс по REST
+	// нечем.
+	MarkRestart = "restart"
 )
 
-var marks = []string{MarkGoal, MarkGoalSet, MarkConstraint, MarkTerm, MarkPronoun, MarkOfftopic, MarkReturn, MarkBare, MarkCompare, MarkUnknown}
+var marks = []string{MarkGoal, MarkGoalSet, MarkConstraint, MarkTerm, MarkPronoun, MarkOfftopic, MarkReturn, MarkBare, MarkCompare, MarkUnknown, MarkRestart}
 
 // Виды ограничений ответа.
 const (
@@ -97,11 +102,15 @@ func (r Rule) Applies(n int) bool {
 // Turn — реплика человека и чего от ответа ждать. Docs — doc_id, каждый
 // должен быть среди источников ответа; альтернативы — через «|»
 // («red-panda|mdd-carnivora»). Unknown — вопрос вне базы: ждём «не знаю».
-// Реплика с меткой goal — контрольная: источники — память задачи.
+// Реплика с меткой goal — контрольная: источники — память задачи. Must —
+// что обязано быть в самом ответе (числа — «0,8», «12»; слова — по началу
+// слова), сверено с текстом корпуса: ответ по базе должен быть не просто с
+// источниками, но и с тем, что в них написано.
 type Turn struct {
 	Text    string   `json:"text"`
 	Docs    []string `json:"docs,omitempty"`
 	Unknown bool     `json:"unknown,omitempty"`
+	Must    []string `json:"must,omitempty"`
 	Marks   []string `json:"marks,omitempty"`
 	Note    string   `json:"note,omitempty"`
 }
@@ -173,6 +182,14 @@ func Validate(s Scenario, docs map[string]bool) error {
 			}
 		case len(t.Docs) == 0:
 			bad("реплика %d: нет ожидаемых docs (вопрос вне базы — unknown: true)", n)
+		}
+		for _, m := range t.Must {
+			if strings.TrimSpace(m) == "" {
+				bad("реплика %d: пустой пункт must", n)
+			}
+		}
+		if len(t.Must) > 0 && (t.Unknown || t.Has(MarkGoal)) {
+			bad("реплика %d: must — только у вопроса по базе", n)
 		}
 		for _, d := range t.Docs {
 			for _, alt := range strings.Split(d, "|") {
