@@ -150,7 +150,7 @@ type chatLane struct {
 	peak   int
 	peakAt string
 	usage  llm.Usage
-	cost  llm.Cost
+	cost   llm.Cost
 }
 
 func (t *Chat) Run(ctx context.Context, s *Stand, r *Result) error {
