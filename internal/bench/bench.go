@@ -391,7 +391,15 @@ func (g *Group) SendWatch(ctx context.Context, req agents.Request, watch func(la
 		if err != nil {
 			return nil, err
 		}
-		sessions = ss
+		// Порядок дорожек — по диалогам, а не по порядку менеджера: после
+		// Restart менеджер поднимает стенд, сортируя диалоги по времени
+		// создания, а дорожки стенда создаются в одну и ту же отметку часов
+		// (на Windows — грубых) и при равенстве встают как придётся. Без
+		// сверки ход «без памяти задачи» записывался бы основной дорожке.
+		sessions, err = g.order(ss)
+		if err != nil {
+			return nil, err
+		}
 	} else {
 		for _, d := range g.Dialogs {
 			sess, err := m.Send(d.ID, req)
@@ -418,6 +426,23 @@ func (g *Group) SendWatch(ctx context.Context, req agents.Request, watch func(la
 	}
 	wg.Wait()
 	return out, errors.Join(errs...)
+}
+
+// order — сессии SendGroup в порядке g.Dialogs (по идентификатору диалога).
+func (g *Group) order(ss []*runs.Session) ([]*runs.Session, error) {
+	by := make(map[string]*runs.Session, len(ss))
+	for _, s := range ss {
+		by[s.View().ConversationID] = s
+	}
+	out := make([]*runs.Session, len(g.Dialogs))
+	for i, d := range g.Dialogs {
+		s, ok := by[d.ID]
+		if !ok {
+			return nil, fmt.Errorf("дорожка «%s»: стенд %s не начал ход в диалоге %s", d.Lane.Name, g.ID, d.ID)
+		}
+		out[i] = s
+	}
+	return out, nil
 }
 
 // Send — ход только этой дорожки.
