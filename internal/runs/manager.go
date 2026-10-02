@@ -154,7 +154,15 @@ func (m *Manager) Load() (int, []error) {
 		}
 	}
 	for g, ids := range m.groups {
-		sort.SliceStable(ids, func(i, j int) bool { return m.convs[ids[i]].Created.Before(m.convs[ids[j]].Created) })
+		// При равном времени создания (Windows: грубые отметки) — по id, иначе
+		// порядок диалогов после перезапуска зависит от обхода карты.
+		sort.SliceStable(ids, func(i, j int) bool {
+			a, b := m.convs[ids[i]].Created, m.convs[ids[j]].Created
+			if a.Equal(b) {
+				return ids[i] < ids[j]
+			}
+			return a.Before(b)
+		})
 		m.groups[g] = ids
 	}
 	return len(convs), problems

@@ -195,10 +195,17 @@ func checksLine(cs []dialogs.Check) string {
 		switch {
 		case c.NA:
 			mark = "[~]"
+		case !c.OK && c.Soft:
+			// Отчётная проверка (must, grounded): ход не валит.
+			mark = "[!]"
 		case !c.OK:
 			mark = "[-]"
 		}
-		parts = append(parts, fmt.Sprintf("%s %s (%s)", mark, c.Name, c.Got))
+		name := c.Name
+		if c.Soft {
+			name += ", отчётно"
+		}
+		parts = append(parts, fmt.Sprintf("%s %s (%s)", mark, name, c.Got))
 	}
 	return strings.Join(parts, "; ")
 }
@@ -495,6 +502,12 @@ func (c *chatClient) Ask(ctx context.Context, text string) (dialogs.Observed, er
 		var v rag.CiteView
 		if c.last.Extra(string(features.RAGCite), &v) {
 			o.Cite = &v
+			// Опора на цитаты — из проверки kb_answer (rag.CiteCheck.Grounded);
+			// у «не знаю» и реплик о разговоре её нет.
+			if !v.Meta && v.Cited.Status != "" {
+				g := v.Check.Grounded
+				o.Grounded = &g
+			}
 		}
 		if o.Reply == "" {
 			o.Reply = c.last.Reply
