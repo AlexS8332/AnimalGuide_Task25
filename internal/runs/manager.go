@@ -381,6 +381,11 @@ func (m *Manager) windowFor(fs features.Set) int {
 	return m.cfg.Window
 }
 
+// AnswerTool — завершающий инструмент справочной по базе (rag.FinishName:
+// rag импортирует runs, и обратный импорт замкнул бы цикл; совпадение
+// сверяет finish_test.go).
+const AnswerTool = "kb_answer"
+
 // record — ход в историю. Неудачный ход записывается без сообщений: история
 // хранит только завершённые (ФТ-15).
 func (m *Manager) record(s *Session, t *Turn) {
@@ -396,7 +401,9 @@ func (m *Manager) record(s *Session, t *Turn) {
 	for k, v := range t.Extras {
 		turn.SetExtra(k, v)
 	}
-	added := res.Added
+	// Отклонённые вызовы kb_answer — в журнале хода (события), а не в
+	// истории: в окне они занимали места ходов (history.DropRejected).
+	added := history.DropRejected(res.Added, AnswerTool)
 	if t.Err != nil {
 		added = nil
 	}

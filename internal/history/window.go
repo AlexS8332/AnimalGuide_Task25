@@ -1,6 +1,9 @@
 package history
 
 import (
+	"encoding/json"
+	"strings"
+
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/llm"
 	"github.com/AlexS8332/AnimalGuide_Task25/internal/tools"
 )
@@ -12,7 +15,8 @@ const DefaultWindow = 8
 // ход с базой кладёт в историю не два сообщения, а пять и больше (реплика,
 // вызов kb_search кодом и его выдача, вызов kb_answer и его приём), и
 // окно в 8 сообщений держит полтора хода. 12 — два-три хода; выдача
-// kb_search прошлых ходов при этом сокращена механизмом compact.
+// kb_search прошлых ходов при этом сокращена механизмом compact, а
+// отклонённые вызовы kb_answer в историю не пишутся (DropRejected).
 const CiteWindow = 12
 
 // DefaultKeepToolRunes — до скольких символов сокращать ответы инструментов
@@ -58,4 +62,71 @@ func Window(ms []llm.Message, n int) []llm.Message {
 		start++
 	}
 	return ms[start:]
+}
+
+// DropRejected — история без отклонённых вызовов завершающих инструментов
+// (finishers, например kb_answer): вызов, на который код ответил ошибкой
+// проверки ({"error": …}), и сам этот ответ. Их место — журнал хода
+// (события tool_error), а не окно: в живом прогоне каждый отказ занимал два
+// сообщения окна из двенадцати, и ход с одним отказом вытеснял из окна
+// пол-хода раньше. Вызов и ответ удаляются парой — по id вызова: ответ
+// инструмента без вызова (и вызов без ответа) API отвергает. Сообщение
+// ассистента, у которого не осталось ни вызовов, ни текста, уходит целиком.
+// Принятые вызовы, вызовы других инструментов и ошибки обычных
+// инструментов (модель по ним поправляет следующий вызов) остаются.
+func DropRejected(ms []llm.Message, finishers ...string) []llm.Message {
+	if len(finishers) == 0 {
+		return ms
+	}
+	fin := map[string]bool{}
+	for _, f := range finishers {
+		fin[f] = true
+	}
+	// Вызовы завершающих инструментов: id → имя.
+	calls := map[string]bool{}
+	for _, m := range ms {
+		for _, c := range m.ToolCalls {
+			if fin[c.Function.Name] {
+				calls[c.ID] = true
+			}
+		}
+	}
+	drop := map[string]bool{}
+	for _, m := range ms {
+		if m.Role == llm.RoleTool && calls[m.ToolCallID] && isError(m.Content) {
+			drop[m.ToolCallID] = true
+		}
+	}
+	if len(drop) == 0 {
+		return ms
+	}
+	out := make([]llm.Message, 0, len(ms))
+	for _, m := range ms {
+		if m.Role == llm.RoleTool && drop[m.ToolCallID] {
+			continue
+		}
+		if len(m.ToolCalls) > 0 {
+			var keep []llm.ToolCall
+			for _, c := range m.ToolCalls {
+				if !drop[c.ID] {
+					keep = append(keep, c)
+				}
+			}
+			if len(keep) == 0 && strings.TrimSpace(m.Content) == "" {
+				continue
+			}
+			m.ToolCalls = keep
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// isError — ответ инструмента — ошибка в обёртке {"error": "…"}
+// (agent.errorPayload).
+func isError(content string) bool {
+	var v struct {
+		Error *string `json:"error"`
+	}
+	return json.Unmarshal([]byte(content), &v) == nil && v.Error != nil
 }
