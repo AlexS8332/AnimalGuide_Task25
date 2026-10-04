@@ -6,7 +6,7 @@
   "status": "done",
   "created": "2026-10-02",
   "updated": "2026-10-03",
-  "repo": "",
+  "repo": "https://github.com/AlexS8332/AnimalGuide_Task25",
   "env": [
     "DEEPSEEK_API_KEY"
   ],
